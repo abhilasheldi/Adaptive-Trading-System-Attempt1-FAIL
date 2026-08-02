@@ -1,0 +1,24 @@
+[project]
+name = "trade-system"
+version = "0.1.0"
+description = "Systematic crypto trading research system"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "pandas-ta",
+    "ccxt",
+    "yfinance",
+    "duckdb",
+    "scikit-learn",
+    "xgboost",
+    "lightgbm",
+    "vectorbt",
+    "mlflow",
+    "optuna",
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

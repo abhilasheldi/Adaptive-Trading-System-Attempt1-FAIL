@@ -83,3 +83,8 @@ reports/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# =====================
+# MLflow runs
+# =====================
+mlruns/
