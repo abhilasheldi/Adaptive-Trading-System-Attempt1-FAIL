@@ -1,1 +1,85 @@
+# =====================
+# Aider
+# =====================
 .aider*
+
+# =====================
+# Python
+# =====================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# =====================
+# Virtual environments
+# =====================
+.venv/
+venv/
+env/
+
+# =====================
+# Secrets / API keys
+# =====================
+.env
+.env.*
+!.env.example
+
+# =====================
+# IDE settings
+# =====================
+.vscode/
+.idea/
+
+# =====================
+# Logs
+# =====================
+*.log
+logs/
+
+# =====================
+# Data
+# =====================
+data/
+datasets/
+*.csv
+*.parquet
+*.db
+*.sqlite
+*.sqlite3
+
+# =====================
+# Machine learning models
+# =====================
+models/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.h5
+*.keras
+*.pkl
+*.joblib
+
+# =====================
+# Backtesting results
+# =====================
+backtests/
+results/
+reports/
+
+# =====================
+# Jupyter
+# =====================
+.ipynb_checkpoints/
+
+# =====================
+# OS files
+# =====================
+.DS_Store
+Thumbs.db
+desktop.ini
