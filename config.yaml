@@ -1,0 +1,14 @@
+data_dir: "data/raw"
+crypto:
+  symbols: ["BTC/USDT", "ETH/USDT"]
+  timeframes: ["1h", "4h"]
+  outlier_threshold_pct: 10.0
+  gap_tolerance_multiplier: 1.5
+macro:
+  tickers:
+    dxy_proxy: "UUP"
+    vix: "^VIX"
+    spx: "^GSPC"
+    qqq: "QQQ"
+    btc_dom: "BTC.D"
+    us10y: "^TNX"

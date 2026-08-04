@@ -1,1 +1,1 @@
-# Data ingestion, cleaning, and temporal partitioning logic
+"""Data ingestion, cleaning, and temporal partitioning logic."""
