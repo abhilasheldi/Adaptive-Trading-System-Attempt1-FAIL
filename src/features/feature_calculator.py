@@ -1,13 +1,19 @@
 """Feature engineering module using pandas-ta with strict no-lookahead guarantees.
 
-All calculations are explicitly backward-looking. Rolling windows never use 
-center=True, shifts are strictly positive (past data only), and every output 
-feature is percentile-ranked against a trailing 252-candle history before leaving 
-this module. Raw indicator values are never exposed to downstream consumers.
+All calculations are explicitly backward-looking. Rolling windows never use
+center=True, shifts are strictly positive (past data only), and every output
+feature is percentile-ranked against a trailing 252-candle history before leaving
+this module. Raw indicator values are never exposed to downstream consumers,
+with one deliberate exception documented on `volu_on_breakout` below.
+
+Feature "type" (continuous vs. already-bounded/binary/state) is tracked
+explicitly via the `_FeatureSet` bookkeeping class below rather than inferred
+from column-name substrings, so adding a feature can never silently change
+how an unrelated, similarly-named feature is treated.
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,8 +25,44 @@ logger = logging.getLogger(__name__)
 LOOKBACK_PERCENTILE = 252
 STRUCTURAL_N_SHORT = 20
 STRUCTURAL_N_LONG = 50
+EPS = 1e-9
 
 _REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
+
+
+class _FeatureSet:
+    """Explicit bookkeeping of which output columns are continuous (and must be
+    percentile-ranked) vs. binary/state/already-bounded (and must not be).
+
+    This replaces substring pattern-matching on column names: every column is
+    tagged at the moment it's created, so there is no way for a new feature to
+    be silently mis-classified just because its name resembles an existing one.
+    """
+
+    def __init__(self, index: pd.Index):
+        self._df = pd.DataFrame(index=index)
+        self._continuous: List[str] = []
+        self._excluded: List[str] = []
+
+    def add_continuous(self, name: str, series: pd.Series) -> None:
+        assert name not in self._df.columns, f"Duplicate feature column: {name}"
+        self._df[name] = series
+        self._continuous.append(name)
+
+    def add_excluded(self, name: str, series: pd.Series) -> None:
+        """For binary flags, state classifications, or values already scaled
+        to a meaningful [0, 1] percentile that must not be re-ranked."""
+        assert name not in self._df.columns, f"Duplicate feature column: {name}"
+        self._df[name] = series
+        self._excluded.append(name)
+
+    @property
+    def frame(self) -> pd.DataFrame:
+        return self._df
+
+    @property
+    def continuous_cols(self) -> List[str]:
+        return list(self._continuous)
 
 
 def _validate_input(df: pd.DataFrame) -> None:
@@ -33,252 +75,329 @@ def _validate_input(df: pd.DataFrame) -> None:
     if not isinstance(df.index, pd.DatetimeIndex):
         raise TypeError("DataFrame index must be a DatetimeIndex.")
     if df.index.has_duplicates:
-        raise ValueError("Input DataFrame contains duplicate timestamps. Please deduplicate before passing to feature calculator.")
+        raise ValueError(
+            "Input DataFrame contains duplicate timestamps. Please deduplicate "
+            "before passing to feature calculator."
+        )
+    ohlcv = df[list(_REQUIRED_COLUMNS)]
+    if not np.isfinite(ohlcv.to_numpy(dtype=float)).all():
+        raise ValueError("Input OHLCV data contains NaN or infinite values.")
+    if (ohlcv[["open", "high", "low", "close", "volume"]] < 0).any().any():
+        raise ValueError("Input OHLCV data contains negative price/volume values.")
+    if (df["high"] < df["low"]).any():
+        raise ValueError("Malformed candles detected: high < low.")
+    if ((df["high"] < df[["open", "close"]].max(axis=1))
+            | (df["low"] > df[["open", "close"]].min(axis=1))).any():
+        raise ValueError(
+            "Malformed candles detected: high/low do not bound open/close."
+        )
 
 
-def _calculate_structural_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate structural market features (HH/HL/LH/LL, BOS, ChoCh, SFP, range/trend, distance to S/R, Wyckoff)."""
-    out = pd.DataFrame(index=df.index)
-    
-    # Higher High / Lower Low flags (N=20, N=50) with tolerance for floating-point precision
+def _get_col(frame: pd.DataFrame, prefix: str) -> pd.Series:
+    """Fetch a pandas-ta output column by prefix instead of a hardcoded exact
+    name. pandas-ta's column-name suffixes (e.g. the std-dev formatting on
+    Bollinger Bands, or the k/d params on StochRSI) vary across versions and
+    across float vs. int parameter types. Matching by unique prefix is what
+    actually survives a `pip install -U pandas-ta`.
+    """
+    matches = [c for c in frame.columns if c.startswith(prefix)]
+    if len(matches) != 1:
+        raise KeyError(
+            f"Expected exactly one column starting with '{prefix}' from "
+            f"pandas-ta output, found {matches}. Columns were: {list(frame.columns)}"
+        )
+    return frame[matches[0]]
+
+
+def _calculate_structural_features(df: pd.DataFrame) -> _FeatureSet:
+    """Structural market features (HH/HL/LH/LL, BOS, ChoCh, SFP, range/trend,
+    distance to S/R, Wyckoff)."""
+    feats = _FeatureSet(df.index)
     epsilon = 1e-6
+
     rolling_high_20 = df["high"].rolling(STRUCTURAL_N_SHORT).max()
     rolling_low_20 = df["low"].rolling(STRUCTURAL_N_SHORT).min()
-    out["struct_hh_20"] = np.isclose(df["high"], rolling_high_20, atol=epsilon).astype(float)
-    out["struct_ll_20"] = np.isclose(df["low"], rolling_low_20, atol=epsilon).astype(float)
-    
     rolling_high_50 = df["high"].rolling(STRUCTURAL_N_LONG).max()
     rolling_low_50 = df["low"].rolling(STRUCTURAL_N_LONG).min()
-    out["struct_hh_50"] = np.isclose(df["high"], rolling_high_50, atol=epsilon).astype(float)
-    out["struct_ll_50"] = np.isclose(df["low"], rolling_low_50, atol=epsilon).astype(float)
-    
-    # Break of Structure (BOS): Close exceeds recent structural pivot (N=20 or N=50)
-    out["struct_bos_bullish"] = ((df["close"] > rolling_high_20.shift(1)) | 
-                                 (df["close"] > rolling_high_50.shift(1))).astype(float)
-    out["struct_bos_bearish"] = ((df["close"] < rolling_low_20.shift(1)) | 
-                                 (df["close"] < rolling_low_50.shift(1))).astype(float)
-    
-    # Change of Character (ChoCh): Reversal signal after BOS
-    out["struct_choch_bullish"] = ((out["struct_bos_bearish"].shift(1) == 1) & 
-                                  (out["struct_bos_bullish"] == 1)).astype(float)
-    out["struct_choch_bearish"] = ((out["struct_bos_bullish"].shift(1) == 1) & 
-                                  (out["struct_bos_bearish"] == 1)).astype(float)
-    
-    # Swing Failure Pattern (SFP): Price breaks structure but closes back inside
-    out["struct_sfp_bullish"] = ((df["low"] < df["low"].shift(1).rolling(STRUCTURAL_N_SHORT).min()) & 
-                                (df["close"] > df["open"])).astype(float)
-    out["struct_sfp_bearish"] = ((df["high"] > df["high"].shift(1).rolling(STRUCTURAL_N_SHORT).max()) & 
-                                (df["close"] < df["open"])).astype(float)
-    
-    # Range vs Trend State: ADX > 25 implies trend, else range
+
+    # Prior-structure references (current candle excluded) — used consistently
+    # by BOS *and* the distance-to-S/R features below, so "structure" means the
+    # same thing everywhere in this function.
+    prior_high_20 = rolling_high_20.shift(1)
+    prior_low_20 = rolling_low_20.shift(1)
+    prior_high_50 = rolling_high_50.shift(1)
+    prior_low_50 = rolling_low_50.shift(1)
+
+    # HH/LL flags: is *this* candle the extreme of its trailing window
+    # (window is inclusive of the current candle by construction/definition).
+    feats.add_excluded(
+        "struct_hh_20", np.isclose(df["high"], rolling_high_20, atol=epsilon).astype(float)
+    )
+    feats.add_excluded(
+        "struct_ll_20", np.isclose(df["low"], rolling_low_20, atol=epsilon).astype(float)
+    )
+    feats.add_excluded(
+        "struct_hh_50", np.isclose(df["high"], rolling_high_50, atol=epsilon).astype(float)
+    )
+    feats.add_excluded(
+        "struct_ll_50", np.isclose(df["low"], rolling_low_50, atol=epsilon).astype(float)
+    )
+
+    bos_bullish = ((df["close"] > prior_high_20) | (df["close"] > prior_high_50)).astype(float)
+    bos_bearish = ((df["close"] < prior_low_20) | (df["close"] < prior_low_50)).astype(float)
+    feats.add_excluded("struct_bos_bullish", bos_bullish)
+    feats.add_excluded("struct_bos_bearish", bos_bearish)
+
+    feats.add_excluded(
+        "struct_choch_bullish",
+        ((bos_bearish.shift(1) == 1) & (bos_bullish == 1)).astype(float),
+    )
+    feats.add_excluded(
+        "struct_choch_bearish",
+        ((bos_bullish.shift(1) == 1) & (bos_bearish == 1)).astype(float),
+    )
+
+    feats.add_excluded(
+        "struct_sfp_bullish",
+        ((df["low"] < df["low"].shift(1).rolling(STRUCTURAL_N_SHORT).min())
+         & (df["close"] > df["open"])).astype(float),
+    )
+    feats.add_excluded(
+        "struct_sfp_bearish",
+        ((df["high"] > df["high"].shift(1).rolling(STRUCTURAL_N_SHORT).max())
+         & (df["close"] < df["open"])).astype(float),
+    )
+
     adx = ta.adx(df["high"], df["low"], df["close"], length=14)
-    out["struct_trend_state"] = (adx["ADX_14"] > 25).astype(float)
-    
-    # Distance to Support/Resistance (normalized by ATR)
-    atr = ta.atr(df["high"], df["low"], df["close"], length=14)["ATR_14"]
-    out["struct_dist_to_resist"] = (rolling_high_20 - df["close"]) / (atr + 1e-9)
-    out["struct_dist_to_support"] = (df["close"] - rolling_low_20) / (atr + 1e-9)
-    
-    # Wyckoff Volume-Range Phase (heuristic: high volume + low range = accumulation/distribution)
+    adx_val = _get_col(adx, "ADX_14")
+    feats.add_excluded("struct_trend_state", (adx_val > 25).astype(float))
+
+    atr = ta.atr(df["high"], df["low"], df["close"], length=14)  # Series, not DataFrame
+    # Distance to S/R uses the SAME prior-structure references as BOS above —
+    # i.e. it excludes the current candle, so it can't trivially read as ~0
+    # just because the current candle happens to set a new high/low.
+    feats.add_continuous("struct_dist_to_resist", (prior_high_20 - df["close"]) / (atr + EPS))
+    feats.add_continuous("struct_dist_to_support", (df["close"] - prior_low_20) / (atr + EPS))
+
     price_range = df["high"] - df["low"]
     vol_sma = ta.sma(df["volume"], length=20)
-    out["struct_wyckoff_phase"] = np.where(
+    wyckoff = np.where(
         (df["volume"] > vol_sma * 1.5) & (price_range < price_range.rolling(STRUCTURAL_N_SHORT).mean()),
         1.0,
-        0.0
+        0.0,
     )
-    
-    return out
+    feats.add_excluded("struct_wyckoff_phase", pd.Series(wyckoff, index=df.index))
+
+    return feats
 
 
-def _calculate_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate volatility features (ATR percentile, BB width, rolling vol, expansion/compression state)."""
-    out = pd.DataFrame(index=df.index)
-    
-    # ATR(14)
-    atr = ta.atr(df["high"], df["low"], df["close"], length=14)["ATR_14"]
-    out["vol_atr_14"] = atr
-    
-    # Bollinger Band Width (normalized by middle band for statistical fidelity)
+def _calculate_volatility_features(df: pd.DataFrame) -> _FeatureSet:
+    """Volatility features (ATR percentile, BB width, rolling vol, expansion/
+    compression state)."""
+    feats = _FeatureSet(df.index)
+
+    atr = ta.atr(df["high"], df["low"], df["close"], length=14)  # Series, not DataFrame
+    feats.add_continuous("vol_atr_14", atr)
+
     bb = ta.bbands(df["close"], length=20, std=2)
-    out["vol_bb_width"] = (bb["BBU_20_2.0"] - bb["BBD_20_2.0"]) / (bb["BBM_20_2.0"] + 1e-9)
-    
-    # 20-period rolling volatility (std of returns)
+    bb_upper = _get_col(bb, "BBU_20_2.0")
+    bb_lower = _get_col(bb, "BBL_20_2.0")
+    bb_mid = _get_col(bb, "BBM_20_2.0")
+    bb_width = (bb_upper - bb_lower) / (bb_mid + EPS)
+    feats.add_continuous("vol_bb_width", bb_width)
+
     returns = df["close"].pct_change()
-    out["vol_std_20"] = returns.rolling(20).std()
-    
-    # ATR Percentile Rank over trailing 252 candles (strictly backward-looking)
-    out["vol_atr_pct_rank"] = atr.rolling(LOOKBACK_PERCENTILE).rank(pct=True)
-    
-    # BB Width Percentile Rank over trailing 252 candles
-    out["vol_bb_width_pct_rank"] = out["vol_bb_width"].rolling(LOOKBACK_PERCENTILE).rank(pct=True)
-    
-    # Volatility State Classification per MASTER_CONTEXT.md thresholds
-    out["vol_state_compressed"] = (out["vol_atr_pct_rank"] < 0.3).astype(float)
-    out["vol_state_expanding"] = ((out["vol_atr_pct_rank"] >= 0.3) & (out["vol_atr_pct_rank"] <= 0.7)).astype(float)
-    out["vol_state_extended"] = (out["vol_atr_pct_rank"] > 0.7).astype(float)
-    
-    # Spike Detection: ATR doubles within 5 candles (tail-risk event)
+    feats.add_continuous("vol_std_20", returns.rolling(20).std())
+
+    atr_pct_rank = atr.rolling(LOOKBACK_PERCENTILE).rank(pct=True)
+    bb_width_pct_rank = bb_width.rolling(LOOKBACK_PERCENTILE).rank(pct=True)
+    feats.add_excluded("vol_atr_pct_rank", atr_pct_rank)
+    feats.add_excluded("vol_bb_width_pct_rank", bb_width_pct_rank)
+
+    feats.add_excluded("vol_state_compressed", (atr_pct_rank < 0.3).astype(float))
+    feats.add_excluded(
+        "vol_state_expanding", ((atr_pct_rank >= 0.3) & (atr_pct_rank <= 0.7)).astype(float)
+    )
+    feats.add_excluded("vol_state_extended", (atr_pct_rank > 0.7).astype(float))
+
     atr_5_shift = atr.shift(5)
-    spike_ratio = atr / (atr_5_shift + 1e-9)
-    out["vol_spike"] = (spike_ratio >= 2.0).astype(float)
-    # Explicitly fill leading warm-up NaNs with 0.0 (no spike) to prevent downstream shape mismatches
-    out["vol_spike"].fillna(0.0, inplace=True)
-    
-    return out
+    spike_ratio = atr / (atr_5_shift + EPS)
+    vol_spike = (spike_ratio >= 2.0).astype(float)
+    vol_spike = vol_spike.fillna(0.0)  # no chained inplace assignment
+    feats.add_excluded("vol_spike", vol_spike)
+
+    return feats
 
 
-def _calculate_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate momentum features (RSI + ROC, divergence, MACD slope, StochRSI, ADX/DI, multi-horizon returns).
-    
-    All calculations are strictly backward-looking. Divergence detection uses a 
-    vectorised rolling-window proxy to identify swing mismatches without iterative peak-finding.
+def _calculate_momentum_features(df: pd.DataFrame) -> _FeatureSet:
+    """Momentum features (RSI + ROC, divergence, MACD slope, StochRSI, ADX/DI,
+    multi-horizon returns).
+
+    Divergence detection uses a vectorised rolling-window proxy (comparison
+    against trailing rolling min/max) rather than iterative swing/pivot
+    detection, and will therefore fire more often than a textbook discretionary
+    definition of divergence. This is a deliberate, documented approximation,
+    not a bug.
     """
-    out = pd.DataFrame(index=df.index)
-    
-    # RSI(14) and Rate of Change
+    feats = _FeatureSet(df.index)
+
     rsi = ta.rsi(df["close"], length=14)
-    out["mom_rsi_14"] = rsi
-    out["mom_rsi_roc"] = rsi.pct_change()
-    
-    # RSI Divergence Detection (Bullish & Bearish)
-    # Vectorised proxy: compares current price swing against rolling min/max of previous N candles.
-    # Bullish: Price makes lower low, but RSI makes higher low.
+    feats.add_continuous("mom_rsi_14", rsi)
+    feats.add_continuous("mom_rsi_roc", rsi.pct_change())
+
     price_ll = df["low"].rolling(STRUCTURAL_N_SHORT).min()
     rsi_ll = rsi.rolling(STRUCTURAL_N_SHORT).min()
-    out["mom_rsi_div_bullish"] = ((df["low"] < price_ll.shift(1)) & 
-                                 (rsi > rsi_ll.shift(1))).astype(float)
-    
-    # Bearish: Price makes higher high, but RSI makes lower high.
+    feats.add_excluded(
+        "mom_rsi_div_bullish",
+        ((df["low"] < price_ll.shift(1)) & (rsi > rsi_ll.shift(1))).astype(float),
+    )
+
     price_hh = df["high"].rolling(STRUCTURAL_N_SHORT).max()
     rsi_hh = rsi.rolling(STRUCTURAL_N_SHORT).max()
-    out["mom_rsi_div_bearish"] = ((df["high"] > price_hh.shift(1)) & 
-                                 (rsi < rsi_hh.shift(1))).astype(float)
-    
-    # MACD Histogram Slope (momentum acceleration/deceleration)
+    feats.add_excluded(
+        "mom_rsi_div_bearish",
+        ((df["high"] > price_hh.shift(1)) & (rsi < rsi_hh.shift(1))).astype(float),
+    )
+
     macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-    out["mom_macd_hist_slope"] = macd["MACDh_12_26_9"].diff()
-    
-    # StochRSI (K line only for responsiveness)
-    stochrsi = ta.stochrsi(df["close"], length=14, stoch_length=14)
-    out["mom_stochrsi_k"] = stochrsi["STOCHRSIk_14_14"]
-    
-    # ADX & Directional Indicator Spread (trend strength + directional bias)
+    macd_hist = _get_col(macd, "MACDh_12_26_9")
+    feats.add_continuous("mom_macd_hist_slope", macd_hist.diff())
+
+    stochrsi = ta.stochrsi(df["close"], length=14, rsi_length=14)
+    feats.add_continuous("mom_stochrsi_k", _get_col(stochrsi, "STOCHRSIk_"))
+
     adx = ta.adx(df["high"], df["low"], df["close"], length=14)
-    out["mom_adx_14"] = adx["ADX_14"]
-    out["mom_di_spread"] = adx["DIP_14"] - adx["DIM_14"]
-    
-    # Multi-horizon price returns (5, 10, 20 periods)
-    for period in [5, 10, 20]:
-        out[f"mom_ret_{period}"] = df["close"].pct_change(period)
-        
-    return out
+    feats.add_continuous("mom_adx_14", _get_col(adx, "ADX_14"))
+    feats.add_continuous("mom_di_spread", _get_col(adx, "DMP_14") - _get_col(adx, "DMN_14"))
+
+    for period in (5, 10, 20):
+        feats.add_continuous(f"mom_ret_{period}", df["close"].pct_change(period))
+
+    return feats
 
 
-def _calculate_volume_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate volume features (z-score, breakout ratio, body ratio, wick direction/magnitude).
-    
-    All operations are vectorised and strictly backward-looking. Division by zero is 
-    guarded against using a small epsilon to prevent silent NaN propagation.
-    """
-    out = pd.DataFrame(index=df.index)
-    
-    # Volume Z-Score: deviation from 20-period mean relative to rolling standard deviation
+def _calculate_volume_features(df: pd.DataFrame) -> _FeatureSet:
+    """Volume features (z-score, breakout ratio, body ratio, wick direction/
+    magnitude)."""
+    feats = _FeatureSet(df.index)
+
     vol_sma = ta.sma(df["volume"], length=20)
     vol_std = df["volume"].rolling(20).std()
-    out["volu_zscore"] = (df["volume"] - vol_sma) / (vol_std + 1e-9)
-    
-    # Volume-on-Breakout Ratio: volume relative to SMA when price breaks recent structure
-    # Breakout defined as closing above/below the rolling max/min of N=20 candles
+    feats.add_continuous("volu_zscore", (df["volume"] - vol_sma) / (vol_std + EPS))
+
     prev_highs = df["high"].shift(1).rolling(STRUCTURAL_N_SHORT).max()
     prev_lows = df["low"].shift(1).rolling(STRUCTURAL_N_SHORT).min()
     is_breakout = (df["close"] > prev_highs) | (df["close"] < prev_lows)
-    out["volu_on_breakout"] = np.where(is_breakout, df["volume"] / (vol_sma + 1e-9), 0.0)
-    
-    # Candle Body Ratio: absolute body size relative to total candle range
-    body = abs(df["close"] - df["open"])
+    breakout_ratio_raw = df["volume"] / (vol_sma + EPS)
+    # Rank the magnitude ONLY among candles where a breakout actually happened,
+    # so "no breakout" (0) is never tied against "weak volume on a real
+    # breakout". Non-breakout candles get an explicit sentinel of 0.0, strictly
+    # below any real ranked value in (0, 1]. Ranking the raw magnitude
+    # unconditionally (as before) let a huge mass of structural zeros pollute
+    # the percentile distribution via tie-averaging.
+    masked_for_rank = breakout_ratio_raw.where(is_breakout)
+    breakout_rank = masked_for_rank.rolling(LOOKBACK_PERCENTILE, min_periods=1).rank(pct=True)
+    breakout_feature = breakout_rank.where(is_breakout, 0.0)
+    feats.add_excluded("volu_on_breakout", breakout_feature)  # already ranked/bounded
+
+    body = (df["close"] - df["open"]).abs()
     total_range = df["high"] - df["low"]
-    out["volu_body_ratio"] = body / (total_range + 1e-9)
-    
-    # Wick Direction/Magnitude: upper and lower wick size relative to total range
+    feats.add_continuous("volu_body_ratio", body / (total_range + EPS))
+
     upper_wick = df["high"] - df[["open", "close"]].max(axis=1)
     lower_wick = df[["open", "close"]].min(axis=1) - df["low"]
-    out["volu_upper_wick_mag"] = upper_wick / (total_range + 1e-9)
-    out["volu_lower_wick_mag"] = lower_wick / (total_range + 1e-9)
-    
-    return out
+    feats.add_continuous("volu_upper_wick_mag", upper_wick / (total_range + EPS))
+    feats.add_continuous("volu_lower_wick_mag", lower_wick / (total_range + EPS))
+
+    return feats
 
 
-def _apply_trailing_percentile_rank(df: pd.DataFrame, window: int = LOOKBACK_PERCENTILE) -> pd.DataFrame:
-    """Apply trailing percentile ranking to all continuous numeric columns.
-    
-    Strictly backward-looking: each value is ranked against the preceding `window` candles.
-    Returns values scaled between 0 and 1. NaNs are preserved for warm-up periods.
-    Binary flags, state classifications, and already-percentile-ranked columns are excluded 
-    to preserve their mathematical properties and prevent distribution distortion.
+def _apply_trailing_percentile_rank(
+    combined: pd.DataFrame, continuous_cols: List[str], window: int = LOOKBACK_PERCENTILE
+) -> pd.DataFrame:
+    """Percentile-rank continuous columns against their trailing `window`
+    history. Which columns are "continuous" is passed in explicitly by the
+    caller (built up via `_FeatureSet.add_continuous`) rather than inferred
+    from column-name substrings.
     """
-    # Deterministic exclusion list for binary/state/already-ranked features
-    exclude_patterns = [
-        "_pct_rank", "_state_", "_spike", 
-        "struct_hh_", "struct_ll_", "struct_bos_", "struct_choch_", 
-        "struct_sfp_", "struct_trend_state", "struct_wyckoff_phase", 
-        "mom_rsi_div_"  # Covers both bullish and bearish divergence flags
-    ]
-    exclude_cols = [c for c in df.columns if any(pat in c for pat in exclude_patterns)]
-    
-    continuous_cols = [c for c in df.columns if c not in exclude_cols]
     if not continuous_cols:
-        return df
-
-    ranked = df.copy()
+        return combined
+    ranked = combined.copy()
     ranked[continuous_cols] = ranked[continuous_cols].rolling(window=window).rank(pct=True)
     return ranked
 
 
+def _first_fully_warmed_index(df: pd.DataFrame, continuous_cols: List[str]) -> int:
+    """Return the integer position of the first row at which every continuous
+    (percentile-ranked) column has a non-NaN value, i.e. has cleared its
+    trailing-252 warm-up. Rows before this are NOT a valid fixed-length
+    feature vector — they're a jagged mix of ready and not-ready columns —
+    and must not be shipped to a downstream consumer.
+    """
+    if not continuous_cols:
+        return 0
+    valid_mask = df[continuous_cols].notna().all(axis=1)
+    valid_positions = np.flatnonzero(valid_mask.to_numpy())
+    if len(valid_positions) == 0:
+        return len(df)  # no fully-warmed row exists yet
+    return int(valid_positions[0])
+
+
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate and normalize technical features for OHLCV data.
-    
+
     Args:
-        df: DataFrame with columns ['open', 'high', 'low', 'close', 'volume'] 
+        df: DataFrame with columns ['open', 'high', 'low', 'close', 'volume']
             and a DatetimeIndex. Must be sorted chronologically.
-            
+
     Returns:
         DataFrame containing fixed-length, percentile-ranked feature vectors.
-        All continuous features are scaled between 0 and 1 based on trailing 252-candle history.
-        NaNs are preserved where insufficient history exists for warm-up periods.
-        
+        Only rows where every continuous feature has cleared its trailing
+        252-candle warm-up are returned — i.e. every row in the output is a
+        genuinely complete, comparable feature vector. Callers that need the
+        raw (partially-NaN) warm-up period should call the private
+        `_calculate_*_features` functions directly.
+
     Raises:
-        ValueError: If input DataFrame is empty or missing required columns.
+        ValueError: If input DataFrame is empty, missing required columns, or
+            contains malformed/invalid OHLCV values.
         TypeError: If index is not a DatetimeIndex.
     """
     _validate_input(df)
-    
-    # Work on a copy to guarantee raw data immutability per MASTER_CONTEXT.md
+
     data = df.copy()
-    
-    # Enforce chronological sorting on the working copy to guarantee strictly backward-looking operations
     if not data.index.is_monotonic_increasing:
         data.sort_index(inplace=True)
-        
-    # Calculate raw features across all requested categories
+
     struct_feats = _calculate_structural_features(data)
     vol_feats = _calculate_volatility_features(data)
     mom_feats = _calculate_momentum_features(data)
     volu_feats = _calculate_volume_features(data)
-    
-    # Explicitly reindex to guarantee strict 1:1 temporal mapping and prevent silent misalignment
-    struct_feats = struct_feats.reindex(data.index)
-    vol_feats = vol_feats.reindex(data.index)
-    mom_feats = mom_feats.reindex(data.index)
-    volu_feats = volu_feats.reindex(data.index)
-    
-    # Combine all features into a single DataFrame
-    combined = pd.concat([struct_feats, vol_feats, mom_feats, volu_feats], axis=1)
-    
-    # Apply trailing percentile ranking to ensure scale consistency across assets/timeframes.
-    # No raw values leave this module.
-    ranked_features = _apply_trailing_percentile_rank(combined)
-    
-    # Align index explicitly and drop rows where warm-up periods produce all NaNs
+
+    all_sets = [struct_feats, vol_feats, mom_feats, volu_feats]
+    combined = pd.concat([fs.frame.reindex(data.index) for fs in all_sets], axis=1)
+    if not combined.columns.is_unique:
+        dupes = combined.columns[combined.columns.duplicated()].tolist()
+        raise RuntimeError(f"Duplicate feature column names detected: {dupes}")
+
+    continuous_cols = [c for fs in all_sets for c in fs.continuous_cols]
+    ranked_features = _apply_trailing_percentile_rank(combined, continuous_cols)
     ranked_features.index = data.index
-    return ranked_features.dropna(how="all")
+
+    cutoff = _first_fully_warmed_index(ranked_features, continuous_cols)
+    n_dropped = cutoff
+    if n_dropped:
+        logger.info(
+            "Dropping %d warm-up rows (of %d) before all continuous features "
+            "have a full %d-candle history.",
+            n_dropped, len(ranked_features), LOOKBACK_PERCENTILE,
+        )
+    result = ranked_features.iloc[cutoff:]
+
+    if result.isna().any().any():
+        bad_cols = result.columns[result.isna().any()].tolist()
+        raise RuntimeError(
+            f"Unexpected NaNs remain in output after warm-up trim: {bad_cols}"
+        )
+    return result
+
