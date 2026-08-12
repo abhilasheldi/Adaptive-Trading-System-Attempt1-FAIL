@@ -22,3 +22,48 @@ predictive_core:
     val_size: 500
     test_size: 500
     step_size: 500
+backtesting:
+  # Calendar-based walk-forward windows for the backtesting harness. Distinct
+  # from predictive_core.walk_forward above, which is a ROW-COUNT splitter for
+  # ML cross-validation, not a calendar-time splitter for strategy backtesting.
+  windows:
+    min_train_years: 2
+    val_months: 6
+    test_months: 6
+    step_months: 3
+    min_folds: 4
+  costs:
+    # Taker fee: calibration placeholder (typical spot-taker tier); replace
+    # with the actual venue/account fee schedule before Phase 5.
+    taker_fee_bps: 5.0
+    # MASTER_CONTEXT requires the 75th percentile of historical spread, not
+    # the median -- the median understates tail-heavy wide-spread regimes.
+    spread_percentile: 75.0
+    # No L2/quote data is ingested by this system (see data_engine), so
+    # spread is proxied from the candle's high-low range. This fraction is a
+    # calibration placeholder -- replace the whole proxy with real quote
+    # data the moment it's available.
+    spread_proxy_fraction_of_range: 0.25
+    # Slippage = slippage_coefficient * |position_size_fraction| * (candle
+    # range / close). Calibration placeholder pending real fill data.
+    slippage_coefficient: 0.5
+    overnight_start_utc_hour: 0
+    overnight_end_utc_hour: 6
+    # A candle-to-candle jump is classified as a "gap event" when it exceeds
+    # this multiple of the recent typical candle range.
+    gap_threshold_mult: 3.0
+  kill_criteria:
+    # Layer 14 research-phase kill criteria (MASTER_CONTEXT exact numbers) --
+    # NOT the Tier 1 live-trading gate, which is a separate, stricter
+    # six-metric checklist implemented elsewhere.
+    oos_sharpe_min: 0.5
+    oos_profit_factor_min: 1.2
+    oos_max_drawdown_max: 0.25
+    # Overfitting diagnostic requested alongside (not one of) the five Layer
+    # 14 criteria above: flag when OOS Sharpe < this fraction of IS Sharpe.
+    is_oos_sharpe_ratio_min: 0.6
+    # "> 2 consecutive folds" is the exact MASTER_CONTEXT number. The
+    # per-transition instability magnitude below is NOT specified in
+    # MASTER_CONTEXT -- it's a configurable convention.
+    ensemble_instability_consecutive_folds: 2
+    ensemble_instability_weight_delta: 0.20
