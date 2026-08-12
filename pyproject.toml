@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Systematic crypto trading research system"
 requires-python = ">=3.12"
 dependencies = [
+    "numpy",
     "pandas",
     "pandas-ta",
     "ccxt",
