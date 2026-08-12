@@ -12,3 +12,13 @@ macro:
     qqq: "QQQ"
     btc_dom: "BTC.D"
     us10y: "^TNX"
+predictive_core:
+  triple_barrier:
+    tp_mult: 2.0
+    sl_mult: 1.0
+    max_candles: 48
+  walk_forward:
+    train_size: 1000
+    val_size: 500
+    test_size: 500
+    step_size: 500
