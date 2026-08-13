@@ -1,0 +1,423 @@
+
+Adaptive Probabilistic Trade Management System — Build Plan (v4, corrected)
+Tooling, Model Usage, and Cost Breakdown by Phase
+What changed from the prior build plan: the document content itself is unchanged (still Version 4) — but six tables embedded in the .docx were missed in the original read-through (only paragraph text was extracted the first time). This version incorporates them: the exact Tier 1 live-trading gate thresholds, the Tier 2 diagnostic metrics, the four-state macro regime table, the MTF alignment scoring table, the volatility state table, and the full seven-condition kill-switch trigger table. These add precision to Phases 1, 2, and 4 below and to the two other documents.
+Assumptions used throughout (unchanged):
+Cursor Hobby = free, ~50 slow premium requests/month, ~2,000 Tab completions/month
+Ollama (local) = free, Qwen2.5-Coder-14B or Devstral, RTX 5070 (12GB VRAM)
+Claude API (pay-as-you-go) = ~$3/M input, ~$15/M output tokens (Sonnet-tier)
+Aider = free, architect/editor model-splitting where noted
+Costs are tooling/infrastructure only — Phase 5 trading capital is separate
+Phase 0 — Environment Setup
+Task
+Tool
+Model
+Cost
+Notes
+Repo scaffolding, folder structure, git init
+Cursor Hobby
+Auto/Sonnet-tier
+$0
+Tab completions cover this
+Dependency management setup
+Cursor Hobby / manual
+—
+$0
+One-time
+Install pandas-ta, vectorbt, pytest, ruff, MLflow, Optuna
+Ollama
+Local model
+$0
+Config files
+Write test_no_lookahead.py skeleton
+Cursor premium request
+Local + Sonnet-tier
+$0–2
+Reused in every later layer
+Phase 0 total: ~$0
+Phase 1 — Research and Edge Verification
+1A — Data Engine (Layer 1)
+Task
+Tool
+Model
+Cost
+Free OHLCV ingestion (ccxt)
+Ollama
+Local model
+$0
+Gap detection, outlier removal, dedup
+Ollama
+Local model
+$0
+Raw/normalized partition separation
+Ollama, 1 Cursor review
+Local + Sonnet-tier
+$0–3
+Free macro data (FRED, yfinance)
+Ollama
+Local model
+$0
+1A subtotal: ~$0–3
+1B — Feature Engineering (Layer 2)
+Task
+Tool
+Model
+Cost
+Structural/volatility/momentum/volume features via pandas-ta
+Ollama
+Local model
+$0
+Percentile normalization (252-candle rolling)
+Ollama
+Local model
+$0
+No-lookahead unit tests
+Cursor premium
+Sonnet-tier
+$3–8
+1B subtotal: ~$3–8
+1C — Predictive Core, Components A+B (Layer 7A/7B)
+Task
+Tool
+Model
+Cost
+k-NN analog engine (min N=50 gate, independence enforcement)
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$5–15
+XGBoost/LightGBM classifier + quantile regressors
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$5–15
+Calibration checking
+Sonnet-tier
+Sonnet-tier
+$2–5
+1C subtotal: ~$12–35 — highest-cost sub-phase, correctly so
+1D — Backtesting Engine, Phase 1 scope (Layer 14, basic)
+Now correctly distinguishes two separate threshold sets — see note below.
+Task
+Tool
+Model
+Cost
+Walk-forward folds on vectorbt (2yr/6mo/6mo, roll 3mo, min 4 folds)
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$5–15
+Transaction cost modeling
+Ollama
+Local model
+$0–3
+Layer 14 stop/revise kill criteria (looser — used to decide continue-vs-revise during R&amp;D): OOS Sharpe &lt; 0.5, profit factor &lt; 1.2, max drawdown &gt; 25%, Risk-On performance worse than aggregate, ensemble instability &gt; 2 consecutive folds
+Ollama
+Local model
+$0
+Monte Carlo (10,000 paths) — deferred to Phase 2
+—
+—
+$0
+1D subtotal: ~$5–18
+Important distinction now visible from the tables: Layer 14's kill criteria (above) are the research-phase thresholds — fail one of these during Phase 1 and you revise the hypothesis, you don't necessarily stop the whole project. These are looser than the Tier 1 live-trading gate (Section 1 of the spec), which is a separate, stricter six-metric checklist that must all pass before real capital is ever deployed:
+Metric
+Threshold
+Profit Factor
+&gt; 1.5
+Sharpe Ratio
+&gt; 1.0
+Sortino Ratio
+&gt; 1.5
+Calmar Ratio
+&gt; 0.5
+Maximum Drawdown
+&lt; 20%
+Expected Value per Trade
+&gt; 0, target &gt; 0.3%
+This gate doesn't get checked until Phase 5 (see 5-Pre below) — but it's worth knowing now that clearing Layer 14's Phase 1 criteria is necessary, not sufficient.
+1E — Go/No-Go review
+Human judgment call, not an AI task. Check against Layer 14 kill criteria (the looser research-phase set above). If any fails, revise and retest.
+Phase 1 total: ~$20–65 in tooling, $0–200 in data (optional/deferrable)
+Phase 2 — System Integration
+2A — Macro Regime Engine (Layer 3)
+Now with the exact four-state table, which sharpens this considerably from the prior plan's general description.
+Regime
+Conditions
+Implication
+Risk-On
+DXY falling/flat, VIX &lt; 20 and falling, BTC dominance expanding, BTC/QQQ correlation positive
+Full trading, standard EV thresholds
+Risk-Off
+DXY rising, VIX &gt; 25 or spiking, cross-asset correlations compressing toward 1.0
+No new long entries in risk assets; existing positions reviewed
+Transitional
+Mixed signals, no clear consensus
+Halve position sizes, tighter EV threshold
+Macro-Event Window
+Scheduled high-impact event within 24h (FOMC, NFP, CPI, BOJ, GDP)
+No new entries; existing positions get tighter stops
+Task
+Tool
+Model
+Cost
+Regime classifier implementing the exact four-state table above
+Ollama
+Local model
+$0
+2B — MTF Alignment (Layer 4)
+Exact scoring table now available.
+Score
+Meaning
+Action
+4/4
+All timeframes aligned
+Full position size
+3/4
+One minor divergence, clear bias
+Standard position size
+2/4
+Mixed structure
+No entry
+1/4 or 0/4
+Severe structural conflict
+No entry, review existing positions
+Task
+Tool
+Model
+Cost
+MTF scorer implementing the exact table above
+Ollama
+Local model
+$0
+2C — Liquidity Trap (Layer 5)
+Task
+Tool
+Model
+Cost
+Heuristic stop-hunt/sweep probability estimator
+Ollama
+Local model
+$0
+2D — Volatility Classifier (Layer 6)
+Exact ATR-percentile state table now available.
+State
+ATR Percentile
+Implication
+Compressed
+&lt; 30th
+Pre-breakout; reduce size until confirmation
+Expanding
+30th–70th
+Active trend initiation; standard sizing
+Extended
+&gt; 70th
+Mature trend/blow-off; reduce size, tighten stops
+Spike
+ATR doubles within 5 candles
+Tail-risk event; no new entries anywhere
+Task
+Tool
+Model
+Cost
+Classifier implementing the exact table above
+Ollama
+Local model
+$0
+2E — Ensemble Meta-Model (Layer 7C)
+Task
+Tool
+Model
+Cost
+Linear weighted average, validation-fold-only weight learning
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$5–12
+Weight-stability check (0.15 threshold, equal-weight fallback)
+Sonnet-tier
+Sonnet-tier
+$2–5
+2F — Explainability Engine (Layer 8)
+Task
+Tool
+Model
+Cost
+Attribution → prose generation
+Haiku-tier API, live
+Haiku-tier
+~$0.01–0.05/trade, ongoing
+Dev-side integration
+Ollama
+Local model
+$0
+2G — Risk Engine (Layer 9)
+Task
+Tool
+Model
+Cost
+Tail-risk probabilities, fat-tail multiplier, correlation check
+Ollama
+Local model
+$0
+2H — Re-validation
+Task
+Tool
+Model
+Cost
+Re-run backtest with Layers 3–9, check for Sharpe degradation
+Sonnet-tier (review)
+Sonnet-tier
+$3–8
+Full Monte Carlo (10,000 resamples) added
+Local compute
+—
+$0
+Data cost decision point
+—
+—
+$50–200/month if committing to paid feeds
+Phase 2 total: ~$10–30 in tooling, ~$50–200/month data if committed
+Phase 3 — Decision and Risk Stack
+3A — Position Sizing, Stage 1 (Layer 10)
+Task
+Tool
+Model
+Cost
+1% fixed-fractional, hardcoded 2%/6%/10% caps
+Ollama
+Local model
+$0
+3B — Trade Selection / EV Filter (Layer 11)
+Task
+Tool
+Model
+Cost
+Six-gate EV filter, lower-CI-bound threshold
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$2–5
+3C–3D — Position Management, Exit Logic (Layers 12–13)
+Task
+Tool
+Model
+Cost
+Re-scoring, confidence decay, five exit types
+Ollama
+Local model
+$0
+3E — Paper Trading setup (Layer 15, start)
+Task
+Tool
+Model
+Cost
+Testnet integration, simulated fills
+Ollama
+Local model
+$0
+Calendar time: 5–8 months, ~100 trades minimum
+—
+—
+—
+Phase 3 total: ~$2–5 in tooling
+Phase 4 — Live Infrastructure
+4A — Monitoring/Model Health Engine (Layer 16)
+Task
+Tool
+Model
+Cost
+Calibration tracking, KS drift test
+Ollama
+Local model
+$0
+Quarterly retraining pipeline (with version rollback)
+Sonnet-tier review
+Sonnet-tier
+$3–8/cycle
+4B — Kill Switch Engine (Layer 17)
+Exact seven-condition trigger table now available — meaningfully more specific than the prior plan's general description.
+Condition
+Immediate Action
+Rolling 30-day drawdown &gt; 10%
+Halt all new entries; manual engineering review before re-enable
+Drawdown &gt; 15% from equity high-water mark
+Full system pause; physical administrator reset only, no automatic re-enable
+Rolling prediction calibration error &gt; 15 percentage points
+Halt order routing; isolate model for recalibration
+Feature drift confirmed (p-value &lt; 0.01)
+Halt entries; inspect data feed and macro regime state
+Exchange data feed outage &gt; 15 minutes
+Unconditional halt
+Volatility Spike (ATR doubles within 5 candles)
+Block all new entries; flag open positions for emergency review
+Three consecutive signal failures of the same type
+Suspend that signal category; investigate before re-enabling
+Task
+Tool
+Model
+Cost
+Implement all seven trigger conditions above, verify no auto-re-enable path exists
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$2–5
+4C — Infrastructure
+Task
+Cost
+24/7 hosting (small VPS)
+$5–20/month
+Continued paper trading (1–2 more months)
+$0 tooling
+Phase 4 total: ~$5–13 in tooling, ~$5–20/month hosting
+Phase 5 — Small Live Capital
+5-Pre — Tier 1 Live-Gate Check (new step, made explicit by the table found)
+Before any deployment: confirm the system clears all six Tier 1 metrics simultaneously on the out-of-sample test set — Profit Factor &gt; 1.5, Sharpe &gt; 1.0, Sortino &gt; 1.5, Calmar &gt; 0.5, Max Drawdown &lt; 20%, EV/trade &gt; 0 (target &gt; 0.3%). This is a stricter, separate check from Layer 14's research-phase kill criteria — don't conflate "passed Phase 1" with "cleared to deploy real capital."
+Task
+Tool
+Model
+Cost
+Automated Tier 1 gate check script, run before every capital-scaling decision
+Ollama
+Local model
+$0
+5A–5C — Deployment, monthly review, staged sizing upgrades
+Task
+Tool
+Model
+Cost
+Deployment wiring, hard-cap enforcement confirmation
+Ollama
+Local model
+$0
+Monthly performance review vs. backtest benchmark
+Sonnet-tier
+Sonnet-tier
+$2–5/month
+Stage 2 (volatility-adjusted sizing)
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$3–8
+Stage 3 (quarter-Kelly)
+Ollama draft, Sonnet review
+Local + Sonnet-tier
+$3–8
+Trading capital at risk
+—
+—
+Separate category
+Phase 5 tooling total: ~$8–21 one-time + $2–5/month ongoing
+Grand Total Summary
+Category
+Low estimate
+High estimate
+One-time tooling/dev cost (Phases 0–5)
+~$45
+~$140 (2–3x if hypothesis needs revision cycles)
+Data (optional, from Phase 2 onward)
+$0
+$200/month
+Hosting (from Phase 4 onward)
+$5/month
+$20/month
+Ongoing model calls
+~$5/month
+~$15/month
+Calendar time
+~7 months
+~10+ months
+Bottom line: unchanged from the prior estimate — $50–150 in tooling, $0–235/month recurring. The genuine addition from this pass is precision: exact gate thresholds now correctly separated into the two-tier system (Layer 14 research gate vs. Tier 1 live gate), and exact tables for macro regime, MTF scoring, volatility state, and kill-switch triggers that the prior plan only described in general terms.

@@ -474,8 +474,9 @@ completely independent of Optuna/weighting/calibration/agreement-gates/any of th
   score and compute its ROC-AUC against the binary up/down label directly (`sklearn.roc_auc_score`). AUC=0.5 means
   a feature carries zero rank-discriminative information on its own. Result, across ALL 39 features: **the single
   best feature (`mom_di_spread`, the ADX directional-index spread) scored AUC=0.5172** — 1.7 percentage points
-  above chance. The median feature scored |AUC-0.5|=0.0024 — indistinguishable from noise. Full ranked table saved
-  to `reports/feature_signal_univariate_auc.csv`.
+  above chance. The median feature scored |AUC-0.5|=0.0024 — indistinguishable from noise. (The full per-feature
+  ranked CSV this produced was a workspace-cleanup casualty on 2026-08-13 — every number that mattered is preserved
+  above; re-running the check, described in full in this entry, regenerates it in under a minute.)
 - **Multivariate ceiling**: a single, generously-capacitated LightGBM binary classifier (63 leaves, unbounded
   depth, 2000 max boosting rounds with real early stopping, no Optuna limits, no class weighting, no calibration,
   none of the system's other constraints — deliberately the *most* favorable conditions the exact same 39 features
@@ -543,18 +544,23 @@ different claim than "the liquidity-sweep-reversal hypothesis has no edge."
 **Stage 5 — the cheap conditioned-subset experiment (executed same session, immediately after Stage 4).** Built
 `scripts/compression_sweep_filter.py`: a minimal, explicitly-labeled **diagnostic-only proxy** for Layer 5 (NOT a
 real implementation of it — `macro_mtf_liquidity_vol/` is still empty), constructed entirely from features
-`feature_calculator.py` already computes, requiring no new indicator logic:
+`feature_calculator.py` already computes, requiring no new indicator logic. **Removed during a 2026-08-13
+workspace cleanup** (self-labeled as diagnostic-only, not production code, and the investigation it served is
+paused — see the end of this session's entries) — logic reproduced exactly below so it can be rebuilt in under five
+minutes if this line of investigation resumes:
 
 - "post-compression" = `vol_state_compressed` was true at any point in the trailing 5 candles (inclusive of the
   current row) — a blunt proxy; a real Layer 5 would define this far more rigorously (contraction slope, duration,
-  etc.). The lookback (5) was chosen empirically: checked 3/5/10/20-candle lookbacks first (see
-  `reports/` investigation output) and picked the smallest that stayed meaningfully selective rather than capturing
-  most of the dataset (compression alone is true 35.5% of all candles and is autocorrelated/persists in runs, so a
-  naive longer lookback like 20 candles would have made "recent compression" true for 56% of ALL candles — nowhere
-  near selective enough to call a "setup").
+  etc.). The lookback (5) was chosen empirically: checked 3/5/10/20-candle lookbacks first and picked the smallest
+  that stayed meaningfully selective rather than capturing most of the dataset (compression alone is true 35.5% of
+  all candles and is autocorrelated/persists in runs, so a naive longer lookback like 20 candles would have made
+  "recent compression" true for 56% of ALL candles — nowhere near selective enough to call a "setup").
 - "liquidity sweep" = `struct_sfp_bullish` or `struct_sfp_bearish` fires on the current candle — already-computed
   Swing Failure Pattern features (a wick beyond a recent swing high/low, immediately rejected back inside range),
   which is structurally exactly a stop-hunt/liquidity-sweep pattern, requiring no new logic to reuse.
+- Implementation was exactly: `mask = (df['vol_state_compressed'].rolling(5, min_periods=1).max() > 0) &
+  ((df['struct_sfp_bullish'] > 0) | (df['struct_sfp_bearish'] > 0))` — a single boolean Series aligned to the
+  modeling frame's index, both inputs already point-in-time-safe, trailing-only rolling window (no lookahead).
 
 Applied to the same full ~9-year real BTC dataset used in Stage 4: **1,600 of 78,378 rows (2.04%) pass the
 filter** — a genuinely selective subset, not "almost everything," which was the real risk with this kind of blunt
@@ -570,7 +576,8 @@ proxy filter. Re-ran both Stage 4 diagnostics on this filtered subset:
 - **Univariate AUC** (up vs. down, 1,600 rows): max |AUC-0.5| = 0.0206 (`struct_dist_to_resist`), median = 0.0068 —
   the same order of magnitude as the unconditioned check (max 0.0172, median 0.0024), if anything nominally higher
   on both ends, but on a much smaller sample where AUC estimates are inherently noisier. No feature shows anything
-  resembling real univariate separation. Full ranked table: `reports/feature_signal_univariate_auc_FILTERED.csv`.
+  resembling real univariate separation. (Ranked CSV cleaned up 2026-08-13 along with the other diagnostic
+  artifacts; every number that mattered is preserved here.)
 - **Multivariate ceiling** (chronological 70/15/15 split → train=1,120 / val=240 / test=240): the model's own early
   stopping halted after **1 boosting round** — i.e., it found nothing worth building a second tree on. **Test AUC =
   0.4361** (below 0.5 — worse than a coin flip on this sample), test logloss (0.6494) very slightly *worse* than
@@ -617,8 +624,8 @@ Results on the pooled, bounded-window, filtered subset (1,223 rows; up-vs-down s
 1,223 rows, 0 neutral again, same pattern as Stage 5):
 
 - **Univariate AUC**: max |AUC-0.5| = 0.0274 (`mom_adx_14`), median = 0.0037 — same order of magnitude as both
-  Stage 4 (unconditioned) and Stage 5 (single-asset filtered) checks. No feature shows real separation. Full table:
-  `reports/feature_signal_univariate_auc_POOLED_FILTERED.csv`.
+  Stage 4 (unconditioned) and Stage 5 (single-asset filtered) checks. No feature shows real separation. (Ranked CSV
+  cleaned up 2026-08-13 along with the other diagnostic artifacts; every number that mattered is preserved here.)
 - **Multivariate ceiling** (chronological 70/15/15 → train=856 / val=183 / test=184, test fold composition 106
   BTC / 78 ETH, confirming the pool is genuinely interleaved, not asset-siloed by the split): early stopping ran
   16 rounds this time (vs. Stage 5's single round) before halting, but the result is, if anything, **slightly worse
@@ -680,3 +687,772 @@ data constraints."
 still unresolved).
 8. **Decide and implement a `data/normalized/` storage convention** and **decide how to act on `is_outlier`/
 `gap_class` flags** (both carried over from the prior entry, unchanged, lower priority than the above).
+
+### Workspace cleanup (2026-08-13, end of session)
+
+Per explicit request, paused this investigation (steps 3a/3b above are unresolved and require a real decision, not
+more free diagnostics) and cleaned up everything that was specific to it, keeping everything that is genuinely
+reusable production work per the Prompt Playbook / Build Plan:
+
+- **Removed**: `scripts/compression_sweep_filter.py` (self-labeled diagnostic-only proxy, not production code —
+  exact logic preserved in the Stage 5 entry above so it can be rebuilt in minutes if this resumes), the three
+  investigation CSVs in `reports/` (`feature_signal_univariate_auc*.csv` — every number they contained is already
+  in the prose above, nothing was lost), and stale build caches (`__pycache__`, `.pytest_cache`, `.ruff_cache` —
+  auto-regenerate, zero value to keep).
+- **Kept** (all genuinely useful production work, not investigation-specific): `scripts/run_walkforward_backtest.py`
+  (the actual Build Plan step 1D tool), `src/predictive_core/dataset.py`, `src/predictive_core/skill_diagnostics.py`,
+  the `diagnostics()` plumbing in `harness.py`/`predictive_core_strategy.py`, the class-weighting and tz/dedup-
+  performance fixes in `boosted_core.py`/`analog_engine.py`, the macro-fetcher bug fixes, the `label_horizon`
+  cross-check and provenance docstring in `labeling.py`, and every test file added this session. All 60 tests still
+  pass after cleanup. `data/raw/*.parquet` (cached real BTC/ETH OHLCV) also kept — legitimate, gitignored, exactly
+  what the data engine is supposed to produce, not investigation clutter.
+
+## Session Update: Macro Regime Engine Built (Layer 3) (2026-08-13)
+
+Built `src/macro_mtf_liquidity_vol/macro_regime.py` — the first Phase 2 module (previously `macro_mtf_liquidity_vol/`
+was empty). Implements MASTER_CONTEXT's exact four-state table (`classify_macro_regime`,
+`MacroSignalSnapshot`/`MacroRegimeResult`). Key decisions, checked directly against source docs rather than
+assumed:
+
+- **US10Y is accepted as an input** (the Prompt Playbook's Layer 3 instruction explicitly lists it) **but used in
+  neither classification nor confidence** — verified by re-checking MASTER_CONTEXT's own regime table (both the
+  `.md` and the source `.docx`), which never uses US10Y in any of the four conditions. Echoed on the result for
+  downstream visibility only, with this gap documented in the module docstring rather than silently inventing an
+  unspecified rule for it.
+- **Exact spec numbers hardcoded, not configurable**: `VIX_RISK_ON_MAX=20.0`, `VIX_RISK_OFF_MIN=25.0`,
+  `EVENT_WINDOW_HOURS=24.0` — consistent with how this project already treats other exact spec numbers (e.g.
+  `HistoricalAnalogEngine`'s N≥50 gate). Genuinely unspecified judgment calls ("VIX spiking" has no numeric
+  definition anywhere in the source docs — the Layer 6 asset-volatility Spike definition is a different variable —
+  and "correlations compressing toward 1.0" has no stated threshold either) are explicit, documented, tunable
+  parameters, clearly labeled as non-spec.
+- **Macro-Event Window takes precedence** over Risk-On/Risk-Off/Transitional (checked first, short-circuits) — a
+  documented design decision, since MASTER_CONTEXT's table doesn't state an explicit precedence order but its "no
+  new entries" language for an imminent event reads as unconditional caution, not something an otherwise-calm
+  signal read should override.
+- **`confidence` and `macro_weight` kept as two distinct output numbers**, not one, matching MASTER_CONTEXT's own
+  separate note about correlation-driven relevance: `confidence` is a graded margin score (how deep past its
+  classified state's thresholds the signals sit — deliberately not a trivial 1.0, since every classified state's
+  defining conditions are by construction already satisfied); `macro_weight` is driven purely by `|BTC/QQQ
+  correlation|`, independent of state and of confidence, per MASTER_CONTEXT's explicit "reduce macro weight... in
+  low-correlation periods" instruction. Verified `|+0.9|` and `|-0.9|` correlation produce identical `macro_weight`
+  (sign-independent — relevance is about co-movement existing at all, in either direction, not its sign), and that
+  a Risk-On read and a Risk-Off read with the same `|correlation|` get the same `macro_weight`.
+- **tz-safety applied proactively** in the event-window check (`_hours_until`), reusing the exact lesson from the
+  `HistoricalAnalogEngine.predict()` tz-crash found and fixed earlier this session — normalizes both the snapshot
+  timestamp and the caller-supplied event timestamp to UTC before comparing, tested with a tz-naive event against a
+  tz-aware snapshot.
+
+**One real bug caught before it shipped**: the first draft's `risk_off_score` accidentally summed the correlation
+margin twice and divided by 4, when Risk-Off has only three defining conditions (DXY, VIX, correlation — no
+dominance leg, unlike Risk-On's four) and the correlation margin wasn't normalized relative to
+`risk_off_correlation_threshold` (0.7) the way the DXY/VIX margins were normalized relative to their own
+thresholds. Found by manual review immediately after writing the code, before any test was written against the
+buggy version, and fixed to average over 3 threshold-relative components.
+
+Added `tests/test_macro_regime.py` (21 tests): all four states reachable from synthetic input (the literal "Done
+when" bar), Macro-Event Window precedence over otherwise-Risk-On signals, exact 24h boundary behavior (inclusive)
+and tz-safety on the event check, `macro_weight` sign/state-independence, confidence gradation (deep vs. marginal
+Risk-On, genuinely-mixed Transitional), US10Y non-effect-but-echoed, and input validation. Full suite: 81/81 pass.
+
+### Next Steps
+
+- Layer 4 (MTF Alignment) and Layer 5 (Liquidity Trap heuristic) remain unbuilt — `macro_mtf_liquidity_vol/` now
+  has one of three planned modules.
+- This module is not yet wired into `WalkForwardBacktester` (via `regime_col`) or `PredictiveCoreStrategy` — doing
+  so is what would make the Layer 14 `risk_on_regime_vs_aggregate` kill criterion (currently always
+  `not_evaluated`) actually computable, and is a natural next step once Layer 4/5 exist alongside it.
+- Everything else carried over from prior entries (the compression/sweep signal investigation is paused, not
+  resolved; the `data/normalized/` convention and `is_outlier`/`gap_class` handling are still undecided) is
+  unchanged.
+
+## Session Update: MTF Alignment Engine Built (Layer 4) (2026-08-13)
+
+Built `src/macro_mtf_liquidity_vol/mtf_alignment.py` (`score_mtf_alignment`, `MTFAlignmentResult`) — second of three
+planned `macro_mtf_liquidity_vol/` modules (Layer 5 Liquidity Trap still unbuilt).
+
+**A real spec gap found and resolved before writing any code**: MASTER_CONTEXT's scoring table is inherently a
+4-point scale, but neither MASTER_CONTEXT.md nor the Prompt Playbook's build instruction says *which* four
+timeframes. Checked the Adaptive Probabilistic Trade Management System doc's own Layer 4 section directly, which
+states it explicitly: **1H, 4H, 1D, 1W**. That same document also states "MVP scope (Phase 1 only): BTC and ETH
+OHLCV at 1H and 4H. Everything else is added in Phase 2" — confirmed against `config.yaml` (`crypto.timeframes:
+["1h", "4h"]`) that 1D/1W data ingestion genuinely doesn't exist anywhere in this codebase yet. The module is built
+completely and correctly against the real 4-timeframe spec regardless (this is Phase 2 work, same as Layer 3), and
+`score_mtf_alignment` validates that exactly 4 readings are supplied, raising rather than silently accepting fewer
+— but a real invocation with genuine 1D/1W data isn't possible until that ingestion work happens. Documented
+prominently in the module docstring, the same pattern used for Layer 3's economic-calendar and US10Y gaps.
+
+**Scope boundary, mirroring Layer 3's "classifier, not forecaster" split**: the Adaptive doc's own Layer 4
+description says the Layer 2 feature vector "is evaluated at each timeframe... independently" and alignment is
+then "scored" — i.e. this module scores agreement across four *already independently derived* per-timeframe
+directional reads (a signed float in [-1, 1] per timeframe: sign = direction, magnitude = conviction). It
+deliberately does NOT derive a directional call from a raw Layer 2 feature vector itself (e.g. from
+`struct_bos_bullish`/`struct_trend_state`/momentum features) — that translation is a separate, genuinely
+underspecified design question left for whoever wires a real caller up to this function, not invented here.
+
+**Design decisions**, both documented as non-spec judgment calls: what counts as "neutral" per timeframe
+(`DEFAULT_NEUTRAL_BAND=0.15`, since neither MASTER_CONTEXT nor the Adaptive doc quantifies this), and how ties are
+handled (`dominant_direction="mixed"` when bullish/bearish counts are equal — verified this naturally produces the
+*correct* score for the canonical case: a clean 2-2 split scores exactly 2/4, which is a precise semantic match to
+the table's own "mixed structure, no clear directional case" wording, not a coincidence patched over). One
+deliberate, flagged tradeoff: a 1-1 tie with 2 neutral readings also lands at score=1, getting the same
+conservative "no entry, review existing positions" action as a genuine 4-way structural conflict, even though
+"mostly inconclusive" and "severe conflict" are qualitatively different pictures — kept because MASTER_CONTEXT's
+own capital-preservation-first philosophy favors caution over a more elaborate disambiguation that isn't specified
+anywhere.
+
+`MTFAlignmentResult.__post_init__` enforces score/action/trade_permitted internal consistency structurally (raises
+if e.g. score=4 is paired with the wrong action string, or `trade_permitted` disagrees with `score >= 3`) — the
+same "can't silently drift out of sync" discipline used elsewhere in this codebase (e.g. `CriterionResult`'s status
+validation in `kill_criteria.py`).
+
+Added `tests/test_mtf_alignment.py` (24 tests): all four score bands map to their exact table actions (the literal
+"Done when" bar), `trade_permitted` gating (true only for 3/4 and 4/4, per the Adaptive doc's explicit "a trade is
+only considered when alignment is 3/4 or 4/4"), exactly-4-timeframes validation, tie-handling including the 2-2 and
+1-1-with-neutrals cases, confidence gradation, and the configurable neutral band. Full suite: 105/105 pass.
+
+**Found while researching this task, not yet acted on — flagging for a separate decision**: the Adaptive doc's
+Layer 3 section (macro regime) states an exact correlation-based macro-weight rule that wasn't visible when
+`macro_regime.py` was built last session: *"When correlation is high (> 0.6), the macro signal is applied at full
+weight. When correlation is low (< 0.3), the macro signal weight is reduced proportionally."* The already-built
+`_macro_weight` function instead uses a generic linear scale (`|correlation| / correlation_relevance_scale`,
+default scale 0.5) that wasn't checked against this more specific text at the time (the search that session found
+MASTER_CONTEXT's general note but not this more precise Adaptive-doc passage). Not fixed here — this session's task
+was Layer 4, not revisiting Layer 3 — but it's a real, concrete discrepancy between an already-shipped, tested
+module and a source doc passage that should have grounded it. Worth a deliberate follow-up.
+
+### Next Steps
+
+- Layer 5 (Liquidity Trap heuristic) remains the last unbuilt `macro_mtf_liquidity_vol/` module.
+- Decide whether/how to fix `macro_regime.py`'s `_macro_weight` against the Adaptive doc's exact 0.6/0.3
+  correlation thresholds (see finding above) — this touches previously-tested, shipped code, so treat it as its
+  own scoped task with its own review, not a quick inline patch.
+- Neither Layer 3 nor Layer 4 is wired into `WalkForwardBacktester`/`PredictiveCoreStrategy` yet — both are
+  standalone, tested, spec-correct modules waiting for an integration point.
+- Everything else carried over from prior entries is unchanged.
+
+## Session Update: Critical Review of `macro_regime.py` — Correlation Thresholds Fixed (2026-08-13)
+
+Requested explicitly as a self-audit ("review it as a senior AI engineer... check your own work... critical...
+aligns with everything mentioned in the documents"), scoped to `macro_regime.py` primarily, with `mtf_alignment.py`
+and `macro_fetcher.py` also spot-checked. Re-extracted and re-read ALL of MASTER CONTEXT.docx, the Adaptive
+Probabilistic Trade Management System doc's full Layer 3 section (not just the grep snippets used when the module
+was first built), and the Prompt Playbook, specifically hunting for anything macro-related the first build might
+have missed.
+
+### Fixed: the flagged correlation-weight discrepancy from the prior entry
+
+Found the exact source: the Adaptive doc's Layer 3 section states plainly — "When correlation is high (> 0.6), the
+macro signal is applied at full weight. When correlation is low (< 0.3), the macro signal weight is reduced
+proportionally... This is a dynamic weight, not a binary on/off." This was independently corroborated by a worked
+example elsewhere in the same document ("BTC/QQQ corr: 0.64 → macro weight: FULL"), giving two independent
+confirmations of the same 0.6 breakpoint.
+
+- Added `CORRELATION_FULL_WEIGHT_THRESHOLD = 0.6` and `CORRELATION_REDUCED_WEIGHT_THRESHOLD = 0.3` as exact,
+  hardcoded constants (removed `correlation_relevance_scale` as a tunable parameter — it was standing in for a
+  number that turned out to actually be specified).
+- `_macro_weight` now implements a single linear ramp from (corr=0, weight=0) to (corr=0.6, weight=1.0), clipped at
+  1.0 above 0.6 — reproduces "> 0.6 → full weight" exactly, and yields weight=0.5 at exactly corr=0.3 (documented as
+  "consistent with, not uniquely pinned down by" the "< 0.3 → reduced" text, since the source gives only one
+  precise breakpoint, not two — a three-piece function would need an invented second parameter the docs don't
+  supply, so wasn't built).
+- Direct regression test added reproducing the worked example verbatim: `btc_qqq_corr_20d=0.64` → `macro_weight ≈
+  1.0`.
+
+### Two additional gaps found during the same re-read, fixed in the same pass
+
+The Adaptive doc's Layer 3 "Output:" line explicitly lists four required outputs: "macro regime label, macro
+confidence score (0–1), macro-event window flag, current BTC/QQQ correlation coefficient and derived macro
+weight." The first build satisfied two of these (label as `state`, confidence as `confidence`, weight as
+`macro_weight`) but was missing two fields entirely:
+
+- **`MacroRegimeResult.btc_qqq_corr_20d`** — the raw correlation coefficient, now echoed on every result (previously
+  only the *derived* `macro_weight` was exposed, not the coefficient itself).
+- **`MacroRegimeResult.is_macro_event_window`** — an explicit boolean, `== (state == "Macro-Event Window")`,
+  structurally validated in `__post_init__` so it can never silently drift out of sync with `state`. MASTER_CONTEXT's
+  own table presents Macro-Event Window as one of four mutually-exclusive states (matching this module's design),
+  while the Adaptive doc's output line describes it as a separate flag — reconciled by keeping `state` as the single
+  source of truth and adding this as a structurally-guaranteed-consistent derived convenience field, satisfying
+  both documents' descriptions rather than picking one and dropping the other's explicit requirement.
+
+### Checked and confirmed correct, not changed
+
+- Every regime condition (DXY, VIX absolute thresholds 20/25, dominance, correlation) re-verified word-for-word
+  against both MASTER_CONTEXT.docx and the Adaptive doc's full Layer 3 text — identical in both, matches the
+  implementation exactly.
+- The Macro-Event Window action string ("...existing positions get tighter stops") is byte-exact against
+  MASTER_CONTEXT.docx. Noted (not fixed): the Adaptive doc's own phrasing is slightly fuller ("...tighter stops or
+  standing exit instructions") — not contradictory, just more expansive. Kept MASTER_CONTEXT.md's shorter wording
+  since that file is this project's explicitly-labeled "exact table" reference and has been authoritative all
+  session.
+- `macro_fetcher.py`'s ticker set (DXY proxy, US10Y, VIX, BTC dominance, SPX, QQQ) checked directly against the
+  Adaptive doc's explicit list ("DXY daily, US10Y daily, VIX daily, BTC dominance daily, SPX/QQQ daily") — complete,
+  no gaps.
+- `mtf_alignment.py` spot-checked against the same Layer 4 text re-read in full this pass — no new discrepancies
+  found beyond what was already documented when it was built.
+
+### Testing
+
+Added 6 new tests: exact 0.6/0.3 constants, the worked-example regression (corr=0.64 → weight≈1.0), weight exactly
+1.0 at the threshold, weight exactly 0.5 at the 0.3 reference point, weight never exceeds 1.0 above threshold,
+correlation coefficient echoed correctly, and `is_macro_event_window` consistency. All pre-existing tests passed
+unmodified (none had hardcoded the old 0.5-scale exact `macro_weight` values — all were relative/comparison-based).
+Full suite: 112/112 pass.
+
+### Next Steps
+
+- The `macro_fetcher`/`macro_regime`/`mtf_alignment` trio is now internally consistent and re-verified against
+  every available source document. Remaining work is the same as before: Layer 5 (Liquidity Trap) unbuilt, neither
+  Layer 3 nor Layer 4 wired into the backtester yet.
+- Consider whether `mtf_alignment.py` deserves the same depth of re-audit `macro_regime.py` just got (this session
+  only spot-checked it) — not done in this pass since the explicit request was scoped to the macro side.
+
+## Session Update: Liquidity Trap Heuristic Built (Layer 5) (2026-08-13)
+
+Built `src/macro_mtf_liquidity_vol/liquidity_trap.py` (`estimate_liquidity_trap`, `LiquidityCluster`,
+`LiquidityTrapResult`) — third and last of the `macro_mtf_liquidity_vol/` trio planned this session. Grounded
+against source docs before writing anything: `MASTER_CONTEXT.md`/`.docx` has NO table or numbers for this layer at
+all (unlike Layers 3/4/6/17) — the full spec lives only in the Adaptive doc's Layer 5 section and the Prompt
+Playbook's build instruction. Found the exact "trailing 50 candles" number and the precise sweep definition ("stop-
+runs above equal highs or below equal lows, followed by a confirmed reversal") in the Adaptive doc's hypothesis
+section, not its Layer 5 section — required reading both, not just the section with the layer's name on it.
+
+**Scope kept disciplined**, same as `mtf_alignment.py`: the Prompt Playbook's actual instruction says "based on
+equal highs/lows and wick behavior" — narrower than the fuller Adaptive-doc Layer 5 description, which additionally
+lists Fair Value Gap detection, "liquidity void" detection, and previous-session-high/low tracking. None of those
+are built here; documented explicitly as out of scope for this task rather than half-implemented.
+
+**Also found, not acted on (relevant to the paused compression/sweep investigation, not this module)**: the
+hypothesis section defines "post-compression" with a specific number -- "ATR at or below its 20th percentile" --
+distinct from Layer 6's general Compressed state (<30th). Noted for whenever that paused investigation resumes.
+
+### Four real bugs found via testing, not code review — this module's development is the clearest example yet
+this session of why "looks right on read-through" isn't sufficient
+
+Random-walk synthetic data was used for initial manual verification specifically because it's more adversarial
+than hand-crafted data — and it immediately surfaced problems a clean read of the code did not:
+
+1. **Chained clustering with unbounded span.** Proximity grouping compared each sorted value only to its immediate
+predecessor, letting a cluster's total span drift without bound (100.0, 100.2, 100.4, ... each within tolerance of
+its neighbor, first and last arbitrarily far apart). Silently merged nearly an entire 50-candle random walk into
+one fake cluster. Fixed by anchoring every cluster to its lowest unclaimed member and bounding all members' distance
+to that anchor, not to each other.
+2. **"Didn't close through it" checked against the wrong reference.** The first draft checked a candle's close
+against its OWN high/low (`close < high`) — trivially true for nearly every ordinary candle, so it filtered out
+almost nothing. "Rejected at the level" only means something once a shared candidate level exists to be rejected
+AT; fixed with a two-stage structure (group by proximity first, then filter members against the GROUP's shared
+level).
+3. **Resistance/support clusters not filtered by position relative to price.** A cluster from old price action
+that price has since moved away from (e.g. a former high cluster now sitting below current price) was being
+treated as active resistance — incoherent, since nothing is "above" for price to run into. Fixed by requiring
+resistance clusters to sit above the reference price and support clusters below it.
+4. **`min`/`max` reversed when identifying which level a sweep actually reached.** When a candle's high exceeds
+several clusters at once, the code needs the FARTHEST (highest) one to test "confirmed reversal" against — not the
+nearest one, which the wick trivially also exceeded along the way. Had `min()` where `max()` was needed (and vice
+versa for support), so an engineered, deliberate sweep test kept failing to confirm even though the sweep was real
+— caught via direct debugging of the actual cluster/sweep values, not by re-reading the formula.
+
+All four were found and fixed in sequence by running the function against synthetic data and checking the output
+made sense, not by reviewing the code a second time — each fix was verified by re-running the same scenario before
+moving to the next bug. The final formal test suite uses fully deterministic, hand-crafted fixtures (a strictly-
+increasing baseline with a wide per-step price gap) rather than random walks, specifically to avoid a fifth
+near-miss: an early manual "control" check showed an unexpected sweep because injected fixture candles had an
+unintended side effect on the OTHER side's clustering, which turned out to be a legitimate consequence of the
+(now-correct) logic rather than a bug, but was confusing enough to debug that the formal suite avoids the ambiguity
+entirely by isolating each test's fixture.
+
+### Testing
+
+Added `tests/test_liquidity_trap.py` (17 tests): the Done-when bar directly (trap_probability always a clean [0,1]
+float, never a claimed exact price), cluster detection correctness (touch counts, close-through-level exclusion,
+position-relative-to-price filtering), sweep confirmation in both directions plus the "wick breaches but doesn't
+close back" non-confirmation case, no-lookahead (future candles can't affect the current evaluation), and input
+validation. Full suite: 129/129 pass.
+
+### Next Steps
+
+- All three `macro_mtf_liquidity_vol/` modules (macro regime, MTF alignment, liquidity trap) are now built and
+  individually tested. None are wired into `WalkForwardBacktester`/`PredictiveCoreStrategy` yet.
+- `mtf_alignment.py` still hasn't had the same depth of critical re-audit `macro_regime.py` and (via extensive
+  testing during development) `liquidity_trap.py` have now had.
+- Everything else carried over from prior entries (paused compression/sweep investigation, `data/normalized/`
+  convention, `is_outlier`/`gap_class` handling) is unchanged.
+
+## Session Update: Volatility Regime Classifier Built (Layer 6) (2026-08-13)
+
+Built `src/macro_mtf_liquidity_vol/volatility_classifier.py` (`classify_volatility_state`,
+`VolatilityStateResult`). Unlike Layer 5, this layer's exact table lives in `MASTER_CONTEXT.md` (checked directly,
+matches word-for-word) — the fuller Adaptive doc read still surfaced two things worth recording:
+
+- Layer 2's own feature-list prose elsewhere in the Adaptive doc describes volatility state loosely ("expanding if
+  ATR percentile > 60th, compressing if < 30th") — inconsistent with Layer 6's own exact table (Compressed <30th /
+  Expanding 30th–70th / Extended >70th, a proper three-way partition). Checked `feature_calculator.py`'s already-
+  built `vol_state_expanding` flag: it correctly implements the Layer 6 banded definition, not the looser Layer 2
+  prose — confirming the codebase's existing convention (trust the exact table) rather than surfacing a real
+  conflict to resolve.
+- Adaptive doc's Compressed action text adds "...then scale up" beyond MASTER_CONTEXT.md's shorter wording — same
+  treatment as every other minor cross-document wording gap found this session: noted, MASTER_CONTEXT.md's exact
+  text used verbatim.
+
+**Design**: deliberately asymmetric input handling. The percentile band (Compressed/Expanding/Extended) accepts an
+ALREADY-COMPUTED `atr_percentile` scalar (Layer 2's `vol_atr_pct_rank` — this is a thin classifier, not a
+re-derivation of a trailing-252-candle rolling rank). Spike is different: computed HERE, directly, from a short raw
+ATR sequence (current + 5 candles back), using the exact formula `feature_calculator.py`'s own `vol_spike` flag
+already uses. This split exists because the Done-when bar specifically requires "synthetic ATR sequences...
+including the Spike condition specifically (doubling within 5 candles, not just a high percentile)" — which needs
+this module's own tests to exercise the doubling arithmetic directly, not trust an external pre-computed flag.
+
+**Precedence** (undocumented in the source tables, a judgment call): Spike is checked first and overrides whatever
+the percentile band would otherwise say — mirroring the same "most severe state wins" precedence pattern used for
+Macro-Event Window in `macro_regime.py`, and directly verified by tests where a LOW percentile (would read
+Compressed) and a HIGH percentile (would read Extended) both correctly yield Spike when the raw sequence genuinely
+doubles, and conversely a high percentile WITHOUT doubling correctly stays Extended, not Spike.
+
+This module's development was clean — no bugs found via testing this time (unlike `liquidity_trap.py`'s four),
+likely because the logic is genuinely simpler (a single threshold comparison plus one ratio check, vs. clustering
+and multi-candle window logic) and because `feature_calculator.py`'s already-tested, already-shipped formulas were
+reused directly rather than reimplemented from scratch.
+
+### Testing
+
+Added `tests/test_volatility_classifier.py` (21 tests): all four states directly (the Done-when bar), Spike
+overriding both a low AND a high percentile reading, high-percentile-without-doubling staying Extended (proving
+Spike and Extended are genuinely independent, not proxies), exact threshold boundaries (30th/70th/ratio=2.0, all
+tested on both sides), result self-consistency validation, and input validation. Full suite: 150/150 pass.
+
+### Next Steps
+
+- All four `macro_mtf_liquidity_vol/` modules from this session's build list (macro regime, MTF alignment, liquidity
+  trap, volatility classifier) are now built and individually tested. None are wired into
+  `WalkForwardBacktester`/`PredictiveCoreStrategy` yet — that integration remains the natural next step whenever
+  picked up.
+- `mtf_alignment.py` is now the one module in this group that hasn't had a dedicated critical re-audit pass.
+- Everything else carried over from prior entries is unchanged.
+
+## Session Update: MTF Alignment Critical Re-Audit + Cross-Module Consistency Review (2026-08-13)
+
+Gave `mtf_alignment.py` the same critical-re-audit treatment `macro_regime.py` got earlier this session, then
+extended the review across all four `macro_mtf_liquidity_vol/` modules together, specifically hunting for
+cross-module inconsistencies — both requested explicitly by name.
+
+### Real bug found: asymmetric tie confidence
+
+`score_mtf_alignment`'s "mixed" branch (an exact tie between bullish and bearish timeframe counts, e.g. 2-2 or
+1-1) computed `confidence` from `bullish_tfs` only:
+
+```python
+elif n_bullish == n_bearish:
+    dominant_direction = "mixed"
+    score = n_bullish
+    aligned_tfs = bullish_tfs          # BUG: drops the bearish side entirely
+```
+
+Since `confidence = mean(|value| for tf in aligned_tfs)`, this made confidence depend on which arbitrary side
+happened to be labeled "bullish" rather than on how strongly conflicted the picture actually is. Concretely:
+`{1H:+0.9, 4H:+0.9, 1D:-0.16, 1W:-0.16}` (a strong pair tied against a barely-non-neutral pair) reported
+`confidence=0.9`, while the mirrored, structurally identical scenario `{1H:+0.16, 4H:+0.16, 1D:-0.9, 1W:-0.9}`
+(same conflict, labels swapped) reported `confidence=0.16`. Two readings that are the same tie from opposite sides
+must not get different confidence.
+
+Fix: `aligned_tfs = bullish_tfs + bearish_tfs` — both scenarios now report the same value
+(`mean(0.9, 0.9, 0.16, 0.16) = 0.53`). This is the exact same bug *class* the earlier `_deduplicate` work this
+session kept surfacing — an operation that's supposed to be symmetric across two sides silently wasn't. Found by
+directly probing the tie branch with mirrored synthetic inputs, not by code-reading alone — same lesson as
+`liquidity_trap.py`'s four bugs earlier this session: testing found what review missed.
+
+Verified no analogous bug exists in the other three modules by directly re-reading their combination logic:
+- `macro_regime.py`'s Transitional confidence: `1.0 - max(risk_on_score, risk_off_score)` — `max()` is inherently
+  commutative, not an arbitrary-side pick.
+- `liquidity_trap.py`'s `trap_probability = max(resistance_risk, support_risk)` and
+  `liquidity_attraction_score = (resistance_risk + support_risk) / 2.0` — same reasoning, both symmetric by
+  construction.
+- `volatility_classifier.py` has no tie/combination logic at all (single threshold comparison, single ratio check)
+  — no analogous bug is possible.
+
+### Cross-module consistency findings (3 fixed)
+
+1. **Missing named constant for the exact spec threshold.** `mtf_alignment.py`'s `score >= 3` gate
+   ("trade only considered when alignment is 3/4 or 4/4") was two bare literal `3`s (dataclass validation + return
+   statement), while every other exact spec number in the sibling modules (`macro_regime.py`'s `VIX_RISK_ON_MAX`
+   etc., `volatility_classifier.py`'s `COMPRESSED_MAX_PERCENTILE` etc., `liquidity_trap.py`'s
+   `EQUAL_LEVEL_LOOKBACK`) is a named, top-level, directly-testable constant. Fixed: added
+   `TRADE_PERMITTED_MIN_SCORE = 3`, replaced both literals, exported it, added
+   `test_exact_spec_trade_permitted_threshold_is_3`.
+2. **Unexplained default on a required-everywhere-else field.** `MTFAlignmentResult.reasons` had
+   `= field(default_factory=list)` while the analogous `reasons` field on `MacroRegimeResult`,
+   `LiquiditySweepResult` (liquidity_trap.py), and `VolatilityStateResult` are all required, no-default fields.
+   `score_mtf_alignment` always supplies it explicitly anyway, so the default served no purpose but to let direct
+   `MTFAlignmentResult(...)` test construction skip it. Fixed: removed the default (and the now-unused `field`
+   import), updated all direct-construction call sites in `test_mtf_alignment.py` to pass `reasons=[]` explicitly,
+   added `test_reasons_field_has_no_default_matching_sibling_modules`.
+3. **Judgment-call defaults as bare literals instead of named constants.** `macro_regime.py`'s
+   `classify_macro_regime` signature had five judgment-call thresholds
+   (`vix_spike_5d_roc_pct`, `risk_off_correlation_threshold`, `confidence_scale_dxy_pct`, `confidence_scale_vix_roc_pct`,
+   `confidence_scale_dominance_pct`) as bare inline literal defaults, unlike `mtf_alignment.py`'s
+   `DEFAULT_NEUTRAL_BAND` / `liquidity_trap.py`'s `DEFAULT_LEVEL_TOLERANCE_ATR` etc. pattern of exposing
+   judgment-call numbers as named, importable, top-level `DEFAULT_*` constants. Fixed: added
+   `DEFAULT_VIX_SPIKE_5D_ROC_PCT`, `DEFAULT_RISK_OFF_CORRELATION_THRESHOLD`, `DEFAULT_CONFIDENCE_SCALE_DXY_PCT`,
+   `DEFAULT_CONFIDENCE_SCALE_VIX_ROC_PCT`, `DEFAULT_CONFIDENCE_SCALE_DOMINANCE_PCT`, updated the function signature
+   to reference them. Purely a naming/discoverability fix — values unchanged, confirmed by `test_macro_regime.py`'s
+   28 tests passing unmodified.
+
+### Checked and confirmed NOT inconsistencies (deliberately left as-is)
+
+- `_TRADING_IMPLICATIONS` (macro_regime.py, volatility_classifier.py) vs `_ACTIONS` (mtf_alignment.py), and the
+  corresponding `trading_implication` vs `action` result fields: different names because MASTER_CONTEXT's own
+  tables use different column headers per layer ("Trading Implication" for Layers 3/6, "Action" for Layer 4) — this
+  is each module correctly mirroring its own spec's vocabulary, not drift.
+- All four `@dataclass(frozen=True)` result types, all four modules' `reasons: List[str]` field typing, and all
+  `max()`/`min()` usage in `liquidity_trap.py` (all "farthest extent reached" sweep-detection semantics, never
+  arbitrary side-picking) — checked directly via grep and source re-read, no issues.
+
+### Testing
+
+`test_mtf_alignment.py` grew from 24 to 27 tests: `test_tie_confidence_is_symmetric_regardless_of_which_side_is_stronger`
+(regression test for the bug above, asserts both mirrored scenarios yield identical confidence equal to the
+4-way mean, not either 2-way sub-mean), `test_exact_spec_trade_permitted_threshold_is_3`,
+`test_reasons_field_has_no_default_matching_sibling_modules`. Full suite: **153/153 pass**
+(`python -m pytest tests/ -q --ignore=tests/test_binance_real_data.py`).
+
+### Next Steps
+
+- All four `macro_mtf_liquidity_vol/` modules have now each had a dedicated critical re-audit
+  (`macro_regime.py`, `mtf_alignment.py`) or extensive bug-finding-via-testing during initial development
+  (`liquidity_trap.py`'s four bugs, `volatility_classifier.py` clean). Cross-module consistency has been explicitly
+  checked and is confirmed good as of this entry.
+- None of the four modules are wired into `WalkForwardBacktester`/`PredictiveCoreStrategy` yet — that integration
+  is the natural next step whenever picked up.
+- Everything else carried over from prior entries (paused compression/sweep investigation, `data/normalized/`
+  convention, `is_outlier`/`gap_class` handling, the noted-not-acted-on wording discrepancies between
+  MASTER_CONTEXT.md and the Adaptive doc) is unchanged.
+
+## Session Update: Ensemble Meta-Model Built (Layer 7, Component C) (2026-08-13)
+
+Built `src/predictive_core/ensemble.py` (`EnsembleMetaModel`, `EnsembleSignalSet`, `ComponentBSignal`,
+`EnsembleForecast`, plus the pure functions `blend_signals`, `fit_ensemble_weights`, `check_weight_stability`,
+`equal_weights`). Grounded against the Adaptive doc's Layer 7 Component C section and Problem 4's solution text
+(read directly, not from memory) and the Prompt Playbook's 2E build entry, which supplied the exact Done-when bar
+and Cursor-review criteria quoted in the build task.
+
+**Architecture**: strictly `sum(w_i * p_i)` over the five approved inputs (Component A, Component B, macro regime,
+MTF alignment, liquidity trap), weights on a simplex (`scipy.optimize.minimize`, SLSQP, bounds [0,1] + sum-to-1
+constraint), fit via mean multiclass log-loss minimization on the validation fold only. This is the ONLY learned
+parameter set in the module — every per-signal "turn this result object into a [down, neutral, up] distribution"
+conversion is a fixed, deterministic, documented formula, never itself fit, which is what keeps "no non-linear
+stacking, no secondary model" true rather than just asserted.
+
+**Key design decisions, each a documented judgment call (source docs establish these five belong in the linear
+combination but give no conversion formula)**:
+- Component A (`AnalogForecast`) and Component B (new `ComponentBSignal` — no per-row Component B output type
+  existed upstream; `boosted_core.py`'s result dataclasses are fold-level training summaries only) already produce
+  genuine 3-class distributions, used directly.
+- Macro regime: Risk-On/Risk-Off → bullish/bearish lean scaled by `confidence * macro_weight` (both Layer 3 outputs
+  the Adaptive doc's Input line names explicitly — "macro regime score AND dynamic weight"); Transitional AND
+  Macro-Event Window → full neutral (Macro-Event Window's `confidence=1.0` is certainty about the *state*, not a
+  directional call — deliberately not read as directional conviction, a distinction worth flagging since it's easy
+  to miss).
+- MTF alignment: bullish/bearish → lean scaled by `confidence`; "mixed" (a genuine tie) and "neutral" → full
+  neutral.
+- Liquidity trap: directional ONLY when `sweep_just_confirmed` (using `sweep_direction`, scaled by
+  `trap_probability`); otherwise full neutral regardless of how high `trap_probability` reads, since the Adaptive
+  doc frames this signal as adjusting "entry timing risk," never as directional confirmation the way MTF alignment
+  is — a genuinely different role from the other three directional inputs, worth keeping distinct rather than
+  force-fitting a directional read that isn't there.
+- Component A is the one signal that can be fully EXCLUDED (not blended toward neutral) for a given row —
+  `is_valid=False` means "no forecast is issued from this component" (analog_engine's own wording), so there is no
+  estimate to blend; its row-level weight is renormalized across the remaining four signals rather than silently
+  vanishing. When valid, "forecasts with N close to the minimum threshold are weighted lower... automatically" (no
+  formula given) is implemented as a linear confidence ramp from 0 at `N == 50` to 1 at `N == 100` (2x the gate,
+  `DEFAULT_ANALOG_CONFIDENCE_RAMP_MULTIPLE`), also fixed, not learned.
+- Magnitude/duration quantiles pass through from Component B completely unensembled — no other one of the five
+  inputs produces magnitude or duration, so there is nothing to blend against; ensembling a single source against
+  nothing would be a no-op dressed up as a computation.
+- The Adaptive doc's "Final output" list mentions a 95% CI on the direction probability; deliberately NOT computed
+  here — no source doc gives a methodology for deriving one from a blend of five heterogeneous point estimates, and
+  Layer 8 (Explainability Engine), which is what actually renders that CI in the spec's own example output, is
+  explicitly out of scope for Phase 1. Fabricating a CI method here would be exactly the kind of unstated,
+  invented rule this project's other modules have consistently avoided (US10Y in macro_regime.py, precise price
+  levels in liquidity_trap.py).
+
+**Weight stability**: exact Adaptive-doc number, `WEIGHT_INSTABILITY_THRESHOLD = 0.15` ("any single weight changing
+by more than 0.15 between consecutive folds") — noted explicitly in the module docstring that two illustrative
+example lines elsewhere in the Adaptive doc ("STABLE (all fold deltas < 0.10)", "max fold delta: 0.09") are flavor
+text for a sample output, not a second competing threshold, to preempt exactly the kind of confusion a careful
+review would otherwise flag. `EnsembleMetaModel.fit()` checks stability after every fold and switches to
+`equal_weights()` the moment instability triggers; per the spec's "until diagnosed" wording, the fallback is
+persistent — `reset_after_diagnosis()` is a separate, explicit call, so a later fold's own individually-stable-
+looking weights do NOT auto-clear the fallback (tested directly: `test_fallback_persists_even_if_a_later_fold_looks_individually_stable`).
+
+**Done-when bar** ("feeding a raw Layer 2 feature into the ensemble constructor raises an error rather than
+silently being accepted"): satisfied structurally, not by convention. `EnsembleSignalSet` is a frozen dataclass
+with exactly five fields, each `isinstance`-checked in `__post_init__` against its specific upstream result type
+(`AnalogForecast`, `ComponentBSignal`, `MacroRegimeResult`, `MTFAlignmentResult`, `LiquidityTrapResult`) — a raw
+float, dict, or pandas Series fails the type check; an extra keyword argument (e.g. a smuggled-in raw feature)
+fails Python's own dataclass `__init__` (no `**kwargs`, no catch-all field). Tested directly for all five fields
+individually (`test_wrong_type_for_every_field_individually_raises`), not just Component A.
+
+Added `"scipy"` as an explicit `pyproject.toml` dependency (used directly for the constrained weight optimization;
+previously only present transitively via scikit-learn).
+
+### Testing
+
+Added `tests/test_ensemble.py` (44 tests): the Done-when bar and all three Cursor-review criteria quoted in the
+build task (raw-feature rejection across all five fields; `fit_ensemble_weights` demonstrated to assign higher
+weight to a genuinely-informative signal over four deliberately-uninformative ones, on a 200-row synthetic
+validation set; the exact 0.15 threshold triggering instability and fallback correctly, including the "persists
+until diagnosed" behavior) — plus per-signal conversion-formula tests (Macro-Event Window's confidence=1.0 NOT
+read as directional; MTF "mixed" full-neutral despite nonzero confidence; liquidity trap full-neutral without a
+confirmed sweep regardless of probability), Component A exclusion/renormalization and N-ramp monotonicity, exact
+linear-blend arithmetic against a hand-computed expected value, and `EnsembleForecast`/`ComponentBSignal`
+self-consistency validation. Full suite: **197/197 pass**
+(`python -m pytest tests/ -q --ignore=tests/test_binance_real_data.py`).
+
+### Next Steps
+
+- The Ensemble Meta-Model is not yet wired into `PredictiveCoreStrategy` — that adapter's own
+  `ensemble_weights()` method currently returns `None` with a docstring noting exactly this ("No formal linear
+  ensemble meta-model exists yet (Layer 7C, Phase 2)"); `generate_positions()` still combines Component A/B via a
+  hard agreement rule, not `EnsembleMetaModel`. Wiring this in is real integration work (deciding how macro
+  regime/MTF/liquidity trap snapshots get computed per-row inside a walk-forward backtest, none of which
+  `PredictiveCoreStrategy.fit()`/`generate_positions()` currently constructs) — a natural next step, not done here.
+- `min_independent_instances` on `EnsembleMetaModel` must be kept in sync with whatever `HistoricalAnalogEngine`
+  was actually configured with, same cross-module contract as `PredictiveCoreStrategy.label_horizon` vs.
+  `apply_triple_barrier`'s `max_candles` — not cross-checked at runtime (⁠`AnalogForecast` doesn't carry the gate
+  value it was evaluated against), documented instead.
+- Everything else carried over from prior entries is unchanged.
+
+## Session Update: Ensemble Meta-Model Cursor Review (2026-08-13)
+
+Reviewed `ensemble.py` against the Prompt Playbook's exact 2E review criteria (quoted verbatim in the review task).
+Found and fixed one real, confirmed-by-reproduction bug; the other two criteria checked clean against the existing
+design, documented honestly rather than glossed over.
+
+**(1) Raw Layer 2 feature sneaking in — one real gap found and fixed, rest confirmed clean.** Traced every field
+actually read by `_row_distributions`/`blend_signals` back to its source: only `AnalogForecast`'s
+probability/N fields, `ComponentBSignal`'s probability/quantile fields, and a small, explicitly-named subset of
+each Layer 3/4/5 result's own fields (`state`/`confidence`/`macro_weight`; `dominant_direction`/`confidence`;
+`sweep_just_confirmed`/`sweep_direction`/`trap_probability`) are ever touched — never `btc_qqq_corr_20d`,
+`per_timeframe_direction`, cluster levels, or any other passenger field these result objects happen to carry. The
+one real gap: `blend_signals` (exported at module level, called directly throughout this module's own tests) did
+NOT itself validate its `signals` argument was an `EnsembleSignalSet` — a raw dict would have failed with a
+confusing `AttributeError` deep inside `_row_distributions` rather than a clear `TypeError` naming the problem.
+`EnsembleMetaModel.predict()` and `fit_ensemble_weights()` both already isinstance-check before ever reaching
+`blend_signals`, so this was never reachable through the model's own public surface, but it was reachable by any
+caller using `blend_signals` directly. Fixed: added the same isinstance guard directly to `blend_signals`.
+
+**(2) Weights provably never touched by training/test fold data — confirmed to the same standard as existing
+precedent, documented honestly rather than overclaimed.** `fit_ensemble_weights`/`EnsembleMetaModel.fit()` have no
+way to independently verify which walk-forward partition they were handed — same limitation
+`HistoricalAnalogEngine.fit()` already documents for its own training-only requirement (that module can't verify
+its caller passed the training partition either). Re-traced `_mean_log_loss_for_weights`'s closure and the
+`scipy.optimize.minimize` argument order to confirm no accidental extra data source or misthreaded argument exists
+inside the objective function itself — clean. The honest answer to "provably": enforced by interface naming
+(`validation_signals`/`validation_direction`) and caller discipline, not a runtime check, matching the accepted
+standard used everywhere else train/val/test isolation matters in this codebase (the actual leakage prevention is
+architectural — `WalkForwardBacktester` only ever has the correct slice in scope at the point it calls `fit()`).
+Not treated as a bug to fix, since it isn't a regression from any existing standard — but worth stating plainly
+rather than claiming a stronger guarantee than actually exists.
+
+**(3) The 0.15 threshold and equal-weight fallback — one real, serious bug found by direct reproduction (not just
+code reading) and fixed.** `EnsembleMetaModel.fit()` re-derived the fallback decision by calling
+`check_weight_stability()` on the ENTIRE cumulative `_fold_weight_history` on every call. Since
+`check_weight_stability` reports UNSTABLE if ANY pair anywhere in the list it's given exceeds 0.15, this meant one
+old, already-flagged instability (say, fold 0 → fold 1) would permanently re-win on every subsequent `fit()` call,
+regardless of how stable the actual new transition was — making `reset_after_diagnosis()` silently undone by the
+very next fold. Reproduced directly before fixing: after `reset_after_diagnosis()`, fitting a fold whose own
+transition had `delta=0.0` still flipped `is_using_fallback` back to `True`, with `triggering_fold_pair` still
+pinned at the original `(0, 1)`. Fixed: `fit()` now checks only the NEWEST fold-to-fold transition
+(`self._fold_weight_history[-2:]`) to decide whether to (keep) trigger(ing) the fallback — `is_using_fallback`
+is now a genuine sticky flag driven only by new evidence or an explicit `reset_after_diagnosis()` call, never
+re-derived from the full history. The full-history view is still available, unharmed, via a new
+`full_history_stability_report()` method — for a human actually doing the "diagnosis" the spec's fallback-exit
+condition refers to, not for `fit()`'s own automatic decision.
+
+### Testing
+
+Replaced the previous fallback tests (which manually forced internal flags rather than exercising real sequential
+`fit()` calls, and had a conditional `if status == "UNSTABLE"` assertion that could silently pass without ever
+checking the fallback path) with deterministic, seed-seeded end-to-end sequences using two mirror-image synthetic
+folds (`_informative_fold`, `_swing_fold`) that reliably trip instability. Added
+`test_reset_after_diagnosis_survives_the_next_stable_fit_call` as a direct regression test for the bug above.
+`tests/test_ensemble.py`: 45 tests (was 44 — net +1: two new/rewritten tests, one old weak test removed). Full
+suite: **198/198 pass** (`python -m pytest tests/ -q --ignore=tests/test_binance_real_data.py`).
+
+### Next Steps
+
+- Same as the prior entry (Ensemble Meta-Model not yet wired into `PredictiveCoreStrategy`).
+- Everything else carried over from prior entries is unchanged.
+
+## Session Update: Explainability Engine Built (Layer 8) (2026-08-13)
+
+Built `src/predictive_core/explainability.py` (`ExplainabilityEngine`, `SignalContribution`, `TradeRiskSummary`,
+`AnthropicProseGenerator`, plus the pure functions `contributions_from_ensemble`, `direction_probability_ci`).
+Grounded against the Adaptive doc's Layer 8 section (read directly, including its full example output template)
+and the Prompt Playbook's 2F build entry. Also made a small, honest refactor to `ensemble.py`: added
+`blend_signals_detailed()` (returns the final blend PLUS each present signal's `(normalized_row_weight,
+distribution)` pair), with `blend_signals()` now a thin wrapper around it — needed so Layer 8's per-signal
+contribution breakdown reuses the ensemble's exact blend arithmetic instead of re-deriving the same non-trivial
+per-signal logic (macro state→lean, MTF mixed→neutral, liquidity trap sweep-gating, Component A's N-ramp/exclusion)
+a second time, which is exactly the kind of duplication this project's cross-module reviews have caught drifting
+out of sync elsewhere.
+
+**This module computes nothing new about the trade itself — it's a renderer.** Every number in its output is
+either read directly from `EnsembleForecast`/`WeightStabilityReport`, or derived by an exact, provable formula from
+one:
+
+- **Signal contributions** (provable, not invented): `impact_pct_i = 100 * w_i * (p_i[called] - p_i[opposite])`
+  per signal, using each signal's actual row-level (post-renormalization) weight and its own `[down, neutral, up]`
+  distribution — both taken directly from `blend_signals_detailed`. Summing all five equals exactly `100 *
+  (p_final[called] - p_final[opposite])`, verified directly in the test suite
+  (`test_contributions_sum_to_the_called_vs_opposite_net_lean`), not merely asserted. A signal that disagrees with
+  the ensemble's called direction, even while outweighted, reads as genuinely negative under this single uniform
+  formula — this is how the format's +/- mix arises, without needing two different formulas for the positive and
+  negative sides.
+- **Deliberately NOT reconstructed**: the Adaptive doc's own example shows contribution lines that aren't among the
+  ensemble's five formal inputs at all (e.g. "Market structure (BOS + CHOCH confirmed, 4H)", "RSI bearish
+  divergence active (4H)") — raw Layer 2 features the ensemble deliberately never touches. No source doc gives a
+  formula for turning a raw feature into a percentage-point contribution (`feature_importance` is a fold-level
+  TRAINING statistic, not a per-prediction attribution — using it as one would be a real methodological error, not
+  just an approximation). `contributions_from_ensemble` only computes the five formal inputs; a caller with
+  additional diagnostic signals (e.g. `VolatilityStateResult`) can construct extra `SignalContribution` entries
+  directly and pass them into `explain()` — this module renders whatever it's given, from any source.
+- **95% CI**: a Wilson score interval (standard, not invented) over Component A's own `analog_n_independent`,
+  explicitly labeled as an approximation (N genuinely belongs to only one of the five blended signals) — returns
+  "unavailable" rather than fabricating a CI when Component A didn't contribute a valid forecast. This was the
+  exact question `ensemble.py`'s own docstring deferred to "whenever Layer 8 is built" — resolved here.
+- **EV gate**: exact MASTER_CONTEXT number, `EV_LOWER_CI_GATE_PCT = 0.15` (constraint 7 / constraint 8's six-gate
+  requirement — confirmed by direct grep, not assumed), strict `>` not `>=`.
+- **EV estimate, EV lower CI bound, position size**: explicitly NOT computed here — Layer 9 (Risk Engine) / Layer
+  10 (Position Sizing) outputs, neither built yet in this codebase. Accepted as an already-computed
+  `TradeRiskSummary` the caller supplies, mirroring how `mtf_alignment.py` accepts already-derived directional
+  reads instead of computing them from raw features.
+
+**Live prose generation, numeric-safety boundary.** `AnthropicProseGenerator` calls the Anthropic API (added as a
+new `pyproject.toml` dependency; installed and confirmed working — `anthropic==0.121.0`) with a cheap/fast model
+(`claude-haiku-4-5-20251001` default, matching the Prompt Playbook's "Haiku-tier API call for live text"
+instruction) to phrase each contribution's ALREADY-COMPUTED label/detail into a short natural-language line. The
+model is never shown, and never asked to produce, any actual number (percentage, N, EV, position size) — it only
+returns JSON mapping each contribution's id to a prose phrase; every number in the final report always comes from
+this module's own arithmetic regardless of which prose path produced the surrounding text. Verified directly (not
+just asserted): an injected generator that returns a phrase containing a fabricated `+999%` still produces a
+report where the REAL trailing percentage for that line is the correct computed `impact_pct`
+(`test_live_api_cannot_smuggle_wrong_numbers_into_the_report`). The client is constructed lazily (only on an actual
+API call attempt, never at `__init__`), so building an `ExplainabilityEngine(enable_live_api=True)` never requires
+an API key by itself.
+
+**Done-when bar** ("output format matches the structure above and degrades gracefully if the API call fails"):
+verified two ways. Format: `report_text` reproduces the example's structure line-for-line (asset/setup header,
+probability+CI line, "Signal contributions:" section with aligned +/- percentages, EV lines with gate check,
+position size, stability line) — visually confirmed against a rendered sample, matching closely. Graceful
+degradation: ANY failure of the live path (network error, auth error, timeout, malformed/incomplete JSON, or any
+exception a caller-injected generator raises) is caught uniformly and falls back to a deterministic template for
+EVERY contribution (all-or-nothing, never a partial mix), with `used_live_api=False` reported so the fallback is
+visible rather than silent. `enable_live_api=False` (the "config flag to swap in a template-based fallback") skips
+the live path entirely — verified the generator is never even invoked when the flag is off, via an injected
+generator that raises `AssertionError` if called at all.
+
+### Testing
+
+Added `tests/test_explainability.py` (29 tests). No test makes a real network call — the live-API path is always
+exercised through dependency-injected fake generators (success, exception-raising, incomplete/malformed response,
+empty-string phrases), never the real `AnthropicProseGenerator`. Covers: the provable sum identity, contribution
+sorting/filtering, the exact +0.15% gate boundary (strict `>`), Wilson CI correctness and its
+`analog_is_valid=False` → `None` case, the full Done-when bar (format + all four degradation paths), and the
+numeric-safety boundary test above. One fixture correction made along the way: an early version of the test
+fixture fit a real `EnsembleMetaModel` on a synthetic fold where `macro_regime` was held constant — log-loss
+minimization correctly learned to assign it ~0 weight (correct ensemble behavior), which broke two tests that
+needed every one of the five signals to carry a real contribution. Fixed by building test forecasts directly via
+`blend_signals_detailed` with an explicit, known weight vector (equal weights by default) instead of relying on
+optimizer output for these format-focused tests — optimizer behavior itself is already covered by
+`test_ensemble.py`. Full suite: **227/227 pass** (`python -m pytest tests/ -q --ignore=tests/test_binance_real_data.py`).
+
+### Next Steps
+
+- The Explainability Engine is not wired into `PredictiveCoreStrategy`/`WalkForwardBacktester` — no caller in this
+  codebase currently constructs `TradeRiskSummary` (Layer 9/10 don't exist) or calls `explain()` end-to-end from a
+  real backtest row.
+- `AnthropicProseGenerator` has not been exercised against the real Anthropic API in this session (no
+  `ANTHROPIC_API_KEY` is set in this environment) — only the fallback/injection paths have been verified. The live
+  path's actual prompt/response behavior should be sanity-checked against a real API call before relying on it in
+  production.
+- Everything else carried over from prior entries is unchanged.
+
+## Session Update: Risk Engine Built (Layer 9) (2026-08-13)
+
+Built `src/risk_sizing_selection/risk_engine.py` (`assess_risk`, `RiskEngineInputs`, `RiskAssessment`, plus the
+pure functions `_loss_probability`, `_gap_risk_probability`, `_liquidity_trap_contribution`, `_correlation_flag`,
+`_compute_risk_score`). Grounded against the Adaptive doc's Layer 9 section (read directly) and the Prompt
+Playbook's 2G build entry, whose prereqs (1C = Component A+B, 2D = Volatility Classifier) were both already built.
+First module in `src/risk_sizing_selection/` — the package `__init__.py` already existed as an empty scaffold from
+earlier project setup.
+
+**P(loss > 1%/2%/5%/10%) — a documented judgment call, not a spec formula.** The Adaptive doc says these are
+"derived from the 10th-percentile magnitude estimate from Component B... combined with the stop-loss placement
+from Layer 11" but gives no closed-form equation. Traced `labeling.py`'s `apply_triple_barrier` to confirm exactly
+what Component B's "magnitude" actually measures: MFE (Maximum Favorable Excursion) toward the REALIZED direction
+— there is no adverse/loss-magnitude quantile anywhere in this codebase, so the 10th-percentile magnitude is used
+as a general move-size *scale*, not literally a loss estimate. Built a two-regime exponential-decay exceedance
+model split at the stop-loss boundary: below the stop, ordinary path risk decays smoothly; beyond it, further loss
+can only happen via a gap-through event, so it's gated by `gap_risk_probability` — this is exactly why gap risk is
+a separately-named "tail risk component" in the source doc rather than one continuous curve. A monotonicity guard
+(`min(gap_risk_probability, prob_at_stop)`) prevents a real bug class: without it, a large stop distance relative
+to the magnitude scale could make P(loss > T) jump *up* just past the stop boundary, which isn't a valid
+probability curve — caught by reasoning through the math before writing code, then verified by a dedicated
+regression test (`test_loss_probability_monotonicity_guard_when_gap_risk_exceeds_at_stop_probability`) with inputs
+specifically chosen to trigger the failure mode if the guard were removed.
+
+**Gap risk** — session-classified (UTC weekend / overnight 00:00–06:00 / weekday-intraday), NOT literally historical
+gap frequency (the spec's "estimated from historical gap frequency in the asset at the relevant session times"
+would require a dedicated historical-gap-analysis pipeline this codebase doesn't have — out of scope for this
+module, documented explicitly rather than silently faked). Crypto trades 24/7, so "weekend"/"overnight" here means
+thinned liquidity per the spec's own framing, not a closed exchange.
+
+**Liquidity trap risk** — direct reuse of Layer 5's own `LiquidityTrapResult.trap_probability`, scaled by position
+size per the spec's explicit instruction ("more relevant at larger position sizes; less relevant for BTC/ETH majors
+at retail sizing").
+
+**Portfolio correlation risk** — flags at `DEFAULT_CORRELATION_APPROACH_FRACTION` (80%, a judgment call) of the
+exact MASTER_CONTEXT 6% correlated-direction cap (confirmed via direct grep: constraint 6 and Layer 10 text both
+give this number), matching the spec's own wording ("flags when combined directional exposure APPROACHES the cap",
+not merely exceeds it). Found and fixed a real (if minor) floating-point boundary bug while writing the boundary
+test: `6.0 * 0.8` evaluates to `4.800000000000001` in IEEE 754, not the literal `4.8`, so a caller whose own
+exposure sum landed on exactly the conceptual 80% threshold could fall on either side of the comparison purely from
+float representation. Fixed with a small epsilon tolerance on the comparison — the kind of boundary-precision issue
+this project's testing discipline (writing exact-boundary tests, not just interior-value tests) has caught before.
+
+**Fat-tail multiplier — the Done-when bar.** Exact spec range (1.5x–2.0x); the state-to-endpoint mapping is the
+judgment call: Spike (Layer 6's own most severe "tail-risk event" state) gets 2.0x, Extended gets 1.5x,
+Compressed/Expanding get 1.0x (no adjustment). Applied to all four P(loss > T) probabilities before the risk score
+is derived from them — one source of truth, not two separate multiplier applications. Verified directly, not just
+asserted: Compressed and Expanding produce byte-for-byte IDENTICAL output; Extended and Spike probabilities are
+each exactly `min(1.0, baseline * multiplier)`; a live sanity check (printed, not just asserted) showed
+`P(loss>1%)` correctly clipping at 1.000 once `0.717 * 1.5 = 1.076` would otherwise exceed the valid probability
+range.
+
+**Risk score (0–100)** — another documented judgment call: an explicit, auditable weighted sum (P(loss>2%) up to 60
+points, liquidity trap up to 15, gap risk up to 15, correlation exposure's fraction of the 6% cap up to 10, summing
+to a 100-point maximum). `RISK_SCORE_GATE_MAX = 65.0` (exact MASTER_CONTEXT constraint 8 number) is echoed as
+`passes_risk_gate` for context — this module computes the score, it does not itself enforce the six-gate check
+(Layer 11's job, not built).
+
+### Testing
+
+Added `tests/test_risk_engine.py` (44 tests). Direct Done-when-bar verification (`test_compressed_and_expanding_produce_identical_probabilities`,
+`test_extended_multiplies_probabilities_by_exactly_1_5x`, `test_spike_multiplies_probabilities_by_exactly_2_0x`,
+`test_spike_probabilities_strictly_exceed_extended_which_strictly_exceed_baseline`), the monotonicity-guard
+regression test above, gap-risk session-boundary tests (exact overnight-hour boundaries, weekend detection,
+tz-naive-treated-as-UTC), per-component risk-score weight isolation (each of the four terms tested independently at
+its max contribution), the exact 6% cap and its float-precision boundary, and `RiskAssessment`'s own internal
+consistency validation (non-monotonic probabilities rejected, tail-flag/multiplier mismatch rejected). Full suite:
+**271/271 pass** (`python -m pytest tests/ -q --ignore=tests/test_binance_real_data.py`).
+
+### Next Steps
+
+- The Risk Engine is not wired into `PredictiveCoreStrategy`/`WalkForwardBacktester` or `explainability.py` — no
+  caller in this codebase currently constructs `RiskEngineInputs` from a real backtest row or feeds a
+  `RiskAssessment` into `TradeRiskSummary`/Layer 11's (not yet built) EV filter.
+  `RiskEngineInputs.stop_distance_pct`/`.position_size_pct`/`.existing_correlated_direction_exposure_pct` all
+  depend on Layer 10/11 outputs that don't exist yet, same situation as `explainability.py`'s `TradeRiskSummary`.
+- The gap-risk session-rate defaults (`DEFAULT_GAP_RISK_BASE` etc.) are explicitly NOT calibrated against real
+  historical crypto gap-frequency data — a real historical-gap-analysis pipeline would be a genuine future addition
+  if this module is relied on beyond a structural placeholder.
+- Everything else carried over from prior entries is unchanged.

@@ -11,11 +11,13 @@ dependencies = [
     "yfinance",
     "duckdb",
     "scikit-learn",
+    "scipy",
     "xgboost",
     "lightgbm",
     "vectorbt",
     "mlflow",
     "optuna",
+    "anthropic",
     "pytest",
     "ruff",
 ]
