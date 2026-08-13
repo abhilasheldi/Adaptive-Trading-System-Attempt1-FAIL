@@ -19,8 +19,9 @@ so there is exactly one code path that can produce a probability:
    a BTC window and an ETH window are not "the same directional move."
 """
 
+import bisect
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -122,6 +123,7 @@ class HistoricalAnalogEngine:
         self._ref_direction: Optional[np.ndarray] = None
         self._ref_positions: Optional[np.ndarray] = None
         self._ref_timestamps: Optional[np.ndarray] = None
+        self._ref_timestamps_ns: Optional[np.ndarray] = None
         self._ref_asset: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------ #
@@ -159,7 +161,21 @@ class HistoricalAnalogEngine:
         # timeframes are pooled into `historical_df`.
         self._ref_positions = np.arange(len(self._ref_df))
         ts_col = self._ref_df.columns[0]
-        self._ref_timestamps = self._ref_df[ts_col].to_numpy()
+        ts_series = self._ref_df[ts_col]
+        self._ref_timestamps = ts_series.to_numpy()
+        # Integer-nanosecond, UTC-based, tz-NAIVE view of the same
+        # timestamps, precomputed once here rather than per-query:
+        # `_deduplicate` needs a type `bisect` can compare directly at C
+        # speed (plain Python ints), and `predict()`'s query_timestamp
+        # comparison (see `_to_ns`) needs a representation that doesn't
+        # break on tz-aware input (real crypto data is UTC tz-aware; a raw
+        # `.astype("datetime64[ns]")` on a tz-aware array silently drops the
+        # tz with a UserWarning -- converting explicitly via
+        # `tz_convert("UTC").tz_localize(None)` first does the same
+        # numeric conversion without the implicit/warning-worthy step).
+        if isinstance(ts_series.dtype, pd.DatetimeTZDtype):
+            ts_series = ts_series.dt.tz_convert("UTC").dt.tz_localize(None)
+        self._ref_timestamps_ns = ts_series.to_numpy().astype("datetime64[ns]").astype(np.int64)
         self._ref_asset = (
             historical_df[self.asset_col].to_numpy()
             if self.asset_col in historical_df.columns
@@ -253,8 +269,21 @@ class HistoricalAnalogEngine:
 
         candidate_mask = distances <= distance_threshold
         if query_timestamp is not None:
-            ts_col = self._ref_df.columns[0]
-            candidate_mask &= (self._ref_df[ts_col].to_numpy() < np.datetime64(query_timestamp))
+            # Compare via the same int64-ns representation `_deduplicate`
+            # uses (`_ref_timestamps_ns`), not `self._ref_df[ts_col].to_numpy()
+            # < np.datetime64(query_timestamp)` directly: on real (tz-aware,
+            # UTC) data, `.to_numpy()` on a tz-aware column returns an
+            # object array of tz-aware Timestamps, and `np.datetime64()`
+            # cannot represent a timezone -- comparing the two raises
+            # "can't compare offset-naive and offset-aware datetimes" on
+            # every call. Every existing test used tz-naive synthetic
+            # timestamps, so this was never exercised until real (tz-aware)
+            # crypto data was run through it, where it fails on 100% of
+            # `PredictiveCoreStrategy.generate_positions()` calls (every row
+            # passes `query_timestamp`). `_to_ns` normalizes both aware and
+            # naive inputs to the same UTC-based int64-ns scale `fit()`
+            # already computes `_ref_timestamps_ns` in.
+            candidate_mask &= self._ref_timestamps_ns < self._to_ns(query_timestamp)
 
         candidate_idx = np.where(candidate_mask)[0]
         n_raw = int(len(candidate_idx))
@@ -317,6 +346,18 @@ class HistoricalAnalogEngine:
         if not self._fitted:
             raise RuntimeError("HistoricalAnalogEngine.fit() must be called before use.")
 
+    @staticmethod
+    def _to_ns(ts) -> int:
+        """Normalize a timestamp (naive or tz-aware) to the same UTC-based
+        int64-nanoseconds representation as `_ref_timestamps_ns`. tz-aware
+        inputs are converted to UTC before stripping tz info; naive inputs
+        are assumed to already be UTC wall-clock (the convention used
+        throughout this codebase -- see `data_engine.crypto_fetcher`)."""
+        pts = pd.Timestamp(ts)
+        if pts.tzinfo is not None:
+            pts = pts.tz_convert("UTC").tz_localize(None)
+        return int(np.datetime64(pts, "ns").astype(np.int64))
+
     def _weighted_distances(self, query_vector: np.ndarray) -> np.ndarray:
         diff = self._ref_features - query_vector[None, :]
         sq = (diff ** 2) * self._weights[None, :]
@@ -348,23 +389,41 @@ class HistoricalAnalogEngine:
              proportional (see fit()), so using row gaps here would both
              wrongly fold together different assets' windows and wrongly
              treat genuinely-overlapping same-asset windows as independent.
+
+        Performance: accepted candidates are kept per-asset in a timestamp-
+        sorted bucket (plain Python list of int64 ns), so each new candidate
+        only needs to compare against its two time-neighbors in its own
+        asset's bucket (`bisect`, O(log m)) instead of every previously
+        accepted candidate across all assets (the old nested-Python-loop
+        implementation was O(k^2) -- ~293k Python-level `abs()` calls for
+        just 20 queries at realistic reference-set size). This is a pure
+        performance change: acceptance order and the resulting accepted set
+        are identical to the previous implementation, since sorted-neighbor
+        comparison is equivalent to "closest accepted timestamp in this
+        asset's bucket" the same way the old O(k^2) scan was (a candidate
+        colliding with a non-neighbor in time but not a neighbor is
+        impossible once the bucket is kept sorted).
+
+        Assumes `_ref_asset` is either entirely absent (every row uses the
+        `None` bucket, i.e. asset-unaware) or populated for every row (the
+        only two cases `fit()` / `pool_assets` ever produce) -- not a mix of
+        `None` and real values within the same fitted reference set.
         """
+        gap_ns = self._min_temporal_gap.value  # int64 nanoseconds
+        ts_ns = self._ref_timestamps_ns
+
+        buckets: Dict[object, List[int]] = {}
         accepted: List[int] = []
-        accepted_ts: List[np.datetime64] = []
-        accepted_asset: List[object] = []
-        gap = self._min_temporal_gap
         for idx in order:
-            ts = self._ref_timestamps[idx]
+            idx = int(idx)
             asset = self._ref_asset[idx] if self._ref_asset is not None else None
-            collides = False
-            for a_ts, a_asset in zip(accepted_ts, accepted_asset):
-                if asset is not None and a_asset is not None and asset != a_asset:
-                    continue
-                if abs(ts - a_ts) < gap:
-                    collides = True
-                    break
+            t = int(ts_ns[idx])
+            bucket = buckets.setdefault(asset, [])
+            pos = bisect.bisect_left(bucket, t)
+            collides = (pos < len(bucket) and bucket[pos] - t < gap_ns) or (
+                pos > 0 and t - bucket[pos - 1] < gap_ns
+            )
             if not collides:
-                accepted.append(int(idx))
-                accepted_ts.append(ts)
-                accepted_asset.append(asset)
+                bisect.insort(bucket, t)
+                accepted.append(idx)
         return accepted

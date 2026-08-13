@@ -12,16 +12,16 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
-# yfinance tickers whose raw values need a known, deterministic correction.
-# ^TNX (CBOE 10-Year Treasury Note Yield Index) reports yield * 10 -- e.g. 45.2
-# means 4.52%. This is a fixed Yahoo convention, not a judgment call, so we
-# correct it here rather than leaving it as a silent trap for every downstream
-# consumer of "us10y".
-_SCALE_CORRECTIONS = {
-    "^TNX": 0.1,
-    "^TYX": 0.1,  # 30-year yield index, same convention
-    "^FVX": 0.1,  # 5-year yield index, same convention
-}
+# NOTE: ^TNX/^TYX/^FVX (CBOE Treasury yield indices) were once believed to
+# need a "yield * 10" correction (e.g. 45.2 meaning 4.52%) and this module
+# used to apply a 0.1 scale factor to "fix" it. That assumption was checked
+# against live yfinance data and found FALSE for the data this module
+# actually receives: ^TNX closed at 0.917 on 2021-01-04 (matches the real,
+# well-known ~0.92% 10Y yield that day) and at 4.670 on 2026-08-06 (matches
+# the real ~4.67% yield then) -- both already correctly-scaled percentages,
+# with no "* 10" involved. Applying the old 0.1 factor silently divided real
+# yield data by 10 (e.g. 4.670 -> 0.467), corrupting every downstream
+# consumer of "us10y". No scale correction is applied for any ticker.
 
 _COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
 
@@ -84,15 +84,6 @@ def fetch_macro_tickers(
         only_ticker = symbol_list[0]
         name = ticker_to_name.get(only_ticker, only_ticker)
         data.columns = [f"{name}_{metric}" for metric in data.columns]
-
-    # Apply known deterministic scale corrections (e.g. ^TNX yield * 10).
-    for ticker, factor in _SCALE_CORRECTIONS.items():
-        name = ticker_to_name.get(ticker)
-        if name is None:
-            continue
-        matching_cols = [c for c in data.columns if c.startswith(f"{name}_")]
-        for col in matching_cols:
-            data[col] = data[col] * factor
 
     # Warn (don't fail) if a requested ticker came back entirely empty --
     # easy to miss otherwise since yfinance doesn't raise for a bad symbol

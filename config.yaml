@@ -10,7 +10,13 @@ macro:
     vix: "^VIX"
     spx: "^GSPC"
     qqq: "QQQ"
-    btc_dom: "BTC.D"
+    # Not a yfinance ticker. macro_fetcher.ingest_macro() pops this exact key
+    # ("btc_dominance") to route it to CoinGecko instead -- the previous key
+    # name here was "btc_dom", which didn't match, so this was silently never
+    # requested from CoinGecko and "BTC.D" (not a real yfinance symbol) was
+    # sent to yfinance instead, producing all-NaN columns. Value is unused,
+    # only the key's presence matters.
+    btc_dominance: "coingecko"
     us10y: "^TNX"
 predictive_core:
   triple_barrier:

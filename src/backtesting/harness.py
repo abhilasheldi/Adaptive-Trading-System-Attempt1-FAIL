@@ -99,6 +99,15 @@ class SignalStrategy(Protocol):
         not_evaluated)."""
         ...
 
+    def diagnostics(self) -> Optional[dict]:
+        """Returns arbitrary strategy-specific diagnostics captured during
+        this fold's fit() (e.g. classifier calibration/discrimination
+        reports), surfaced per-fold on FoldBacktestResult.diagnostics for
+        reporting -- the harness itself doesn't interpret these, only
+        carries them through. Return None if the strategy has nothing to
+        report."""
+        ...
+
 
 @dataclass
 class SegmentResult:
@@ -123,6 +132,7 @@ class FoldBacktestResult:
     overfit: OverfitDiagnostic
     risk_on_sharpe: Optional[float]
     ensemble_weights: Optional[Dict[str, float]]
+    diagnostics: Optional[dict]
 
 
 @dataclass
@@ -333,6 +343,7 @@ class WalkForwardBacktester:
             overfit=overfit,
             risk_on_sharpe=risk_on_sharpe,
             ensemble_weights=strategy.ensemble_weights(),
+            diagnostics=strategy.diagnostics(),
         )
 
     def _run_segment(

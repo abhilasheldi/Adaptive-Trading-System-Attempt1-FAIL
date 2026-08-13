@@ -29,6 +29,12 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import log_loss
 
 from .calibration import multiclass_calibration_report, CalibrationReport
+from .skill_diagnostics import (
+    DiscriminationReport,
+    baseline_logloss,
+    logloss_skill_score,
+    multiclass_discrimination_report,
+)
 from .splitter import WalkForwardSplitter
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -65,6 +71,14 @@ class DirectionFoldResult:
     val_logloss: float
     test_logloss: float
     calibration_reports: List[CalibrationReport]  # computed on TEST fold, post-calibration
+    # Discrimination/skill diagnostics (see skill_diagnostics.py) -- NOT
+    # redundant with calibration_reports above: calibration alone cannot
+    # catch a classifier that just parrots the training set's majority
+    # class, since a constant base-rate predictor is calibrated by
+    # definition. These catch that failure mode directly.
+    discrimination_reports: List[DiscriminationReport]  # per-class precision/recall/F1, TEST fold
+    test_logloss_baseline: float  # logloss of a constant train-base-rate predictor, on TEST fold
+    test_logloss_skill_score: float  # 1 - test_logloss/test_logloss_baseline; ~0 = no real skill
     feature_importance: Dict[str, float]  # normalized gain importance -> feeds Component A weights
 
 
@@ -97,8 +111,44 @@ class FoldResult:
 # ---------------------------------------------------------------------- #
 
 
-def _direction_objective(trial, X_train, y_train, X_val, y_val, categorical_cols, random_state,
-                          early_stopping_rounds):
+def _compute_class_weights(y_train: np.ndarray, n_classes: int = 3) -> np.ndarray:
+    """
+    Per-sample class weights for the direction classifier's TRAINING set
+    only, computed fresh from `y_train` within the current fold -- never
+    val, never test, never a hardcoded global ratio (a hardcoded ratio
+    would implicitly assume every fold has the same class balance, which
+    isn't guaranteed, and would be a different flavor of the same
+    isolation violation this module otherwise structurally avoids).
+
+    weight_i = n_samples / (n_classes * class_count[y_i]) -- the standard
+    "balanced" class-weight formula: a class occurring at exactly
+    1/n_classes of the training data gets weight 1.0; rarer classes are
+    upweighted, more common classes downweighted, so each class
+    contributes equally to the total weighted loss regardless of raw
+    frequency. Exists to counteract the training objective's tendency to
+    satisfy raw multiclass logloss by defaulting toward the majority class
+    under this codebase's asymmetric triple-barrier geometry default
+    (tp_mult=2.0, sl_mult=1.0, set in labeling.py/config.yaml -- NOT a
+    number MASTER_CONTEXT itself specifies; see labeling.py's docstring),
+    which produces a heavily skewed real-data
+    label split (~65% down / 34% up / <1% neutral, observed on BTC) --
+    confirmed empirically to make the classifier parrot the majority class
+    regardless of Optuna trial budget (see skill_diagnostics.py and
+    project_state.md).
+    """
+    y_train = np.asarray(y_train)
+    n_samples = len(y_train)
+    class_counts = np.array([np.sum(y_train == k) for k in range(n_classes)], dtype=float)
+    # A class with zero samples in this fold would divide by zero -- guard
+    # it, even though the resulting weight is never actually indexed (no
+    # y_i equals that class), so the array itself is always finite.
+    class_counts_safe = np.where(class_counts > 0, class_counts, 1.0)
+    class_weight = n_samples / (n_classes * class_counts_safe)
+    return class_weight[y_train]
+
+
+def _direction_objective(trial, X_train, y_train, X_val, y_val, train_sample_weight, categorical_cols,
+                          random_state, early_stopping_rounds):
     params = {
         "objective": "multiclass",
         "num_class": 3,
@@ -117,8 +167,11 @@ def _direction_objective(trial, X_train, y_train, X_val, y_val, categorical_cols
     }
     # Closure captures ONLY train/val -- test is not an argument to this
     # function and therefore cannot leak into the objective, by construction.
-    train_set = lgb.Dataset(X_train, label=y_train, categorical_feature=categorical_cols,
-                             free_raw_data=False)
+    # weight= applies ONLY to the training set: it changes what the loss
+    # function optimizes against, not how the (unweighted) validation
+    # objective evaluates the result.
+    train_set = lgb.Dataset(X_train, label=y_train, weight=train_sample_weight,
+                             categorical_feature=categorical_cols, free_raw_data=False)
     val_set = lgb.Dataset(X_val, label=y_val, categorical_feature=categorical_cols,
                            reference=train_set, free_raw_data=False)
     model = lgb.train(
@@ -145,10 +198,16 @@ def train_direction_classifier(
     X_val, y_val = val_df[model_cols], _direction_to_class_idx(val_df["direction"].to_numpy())
     X_test, y_test = test_df[model_cols], _direction_to_class_idx(test_df["direction"].to_numpy())
 
+    # Computed once per fold, from y_train only -- reused across every
+    # Optuna trial and the final model below (not recomputed per trial;
+    # "fresh each fold" means exactly that, not "fresh each trial").
+    train_sample_weight = _compute_class_weights(y_train, n_classes=3)
+
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=random_state))
     study.optimize(
         lambda trial: _direction_objective(
-            trial, X_train, y_train, X_val, y_val, list(categorical_cols), random_state, early_stopping_rounds
+            trial, X_train, y_train, X_val, y_val, train_sample_weight, list(categorical_cols),
+            random_state, early_stopping_rounds
         ),
         n_trials=n_optuna_trials,
         show_progress_bar=False,
@@ -160,8 +219,12 @@ def train_direction_classifier(
         "verbosity": -1, "random_state": random_state,
     })
 
-    train_set = lgb.Dataset(X_train, label=y_train, categorical_feature=list(categorical_cols),
-                             free_raw_data=False)
+    # weight= applies ONLY to train_set -- val_set (used for early stopping
+    # and later as the calibration-fitting partition) stays unweighted, so
+    # weighting changes what the loss function optimizes against without
+    # changing how the result is evaluated.
+    train_set = lgb.Dataset(X_train, label=y_train, weight=train_sample_weight,
+                             categorical_feature=list(categorical_cols), free_raw_data=False)
     val_set = lgb.Dataset(X_val, label=y_val, categorical_feature=list(categorical_cols),
                            reference=train_set, free_raw_data=False)
     final_model = lgb.train(
@@ -192,6 +255,18 @@ def train_direction_classifier(
         y_test, test_pred_calibrated, DIRECTION_CLASS_LABELS, n_bins=10
     )
 
+    # --- Discrimination check: same decision rule (argmax of calibrated
+    # probabilities) PredictiveCoreStrategy.generate_positions() actually
+    # uses to call a direction -- see skill_diagnostics.py module docstring
+    # for why calibration_reports above cannot, by itself, catch a
+    # majority-class parrot. ---
+    predicted_class = np.argmax(test_pred_calibrated, axis=1)
+    discrimination_reports = multiclass_discrimination_report(
+        y_test, predicted_class, DIRECTION_CLASS_LABELS
+    )
+    test_logloss_baseline_val = baseline_logloss(y_train, y_test, n_classes=3)
+    test_logloss_skill = logloss_skill_score(test_logloss, test_logloss_baseline_val)
+
     gain = final_model.feature_importance(importance_type="gain")
     gain_sum = gain.sum()
     normalized = gain / gain_sum if gain_sum > 0 else np.ones_like(gain) / len(gain)
@@ -211,6 +286,9 @@ def train_direction_classifier(
         val_logloss=float(val_logloss),
         test_logloss=float(test_logloss),
         calibration_reports=calibration_reports,
+        discrimination_reports=discrimination_reports,
+        test_logloss_baseline=test_logloss_baseline_val,
+        test_logloss_skill_score=test_logloss_skill,
         feature_importance=feature_importance,
     )
     # Attach calibrators + model for downstream inference use.

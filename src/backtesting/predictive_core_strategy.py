@@ -39,9 +39,14 @@ training on it leaks val-partition information through the label. Same for
 `val_df`'s tail relative to whatever follows. `fit()` purges the trailing
 `label_horizon` rows of both train_df and val_df before use. `label_horizon`
 must match whatever `max_candles` value was used when `apply_triple_barrier`
-was originally run upstream -- this adapter has no way to verify that from
-inside `fit()`; get it wrong and the purge silently protects against the
-wrong window size.
+was originally run upstream. `fit()` now cross-checks this on a best-effort
+basis (`_check_label_horizon_matches_upstream`, using the `max_candles`
+value `apply_triple_barrier` records in `df.attrs['label_horizon']` at
+labeling time) and raises loudly on a genuine mismatch -- but this is not
+an airtight guarantee: pandas does not guarantee `.attrs` propagates
+through every possible upstream operation, so an undetected mismatch
+(silently wrong purge length) is still possible if that metadata was lost
+somewhere between labeling and here, not just if it was never set.
 
 Gating: MASTER_CONTEXT's six trade-entry gates (constraint 8) are EV lower
 CI bound, MTF alignment, macro regime, volatility regime, analog sample
@@ -69,7 +74,7 @@ class PredictiveCoreStrategy:
         distance_threshold_percentile: float = 10.0,
         min_direction_confidence: float = 0.55,
         magnitude_position_scale: float = 5.0,
-        max_position: float = 1.0,
+        max_position: float = 0.02,
         n_optuna_trials: int = 15,
         early_stopping_rounds: int = 50,
         random_state: int = 42,
@@ -101,6 +106,22 @@ class PredictiveCoreStrategy:
             (risk_sizing_selection), not built yet. This exists only so the
             Layer 14 backtest has *some* signed, bounded position series to
             evaluate.
+
+            `max_position` defaults to 0.02 (2% of capital), NOT because
+            this is MASTER_CONTEXT's real 2%/6%/10% risk-cap machinery --
+            it isn't; those caps are Layer 10's job and depend on
+            correlated-direction and aggregate-exposure bookkeeping this
+            adapter has no visibility into. This is a much cruder, interim
+            stand-in with a single purpose: without SOME small cap, a
+            Phase-1 research run whose only goal is testing whether
+            Component B/A show genuine directional skill can instead end
+            up reporting catastrophic Sharpe/drawdown numbers that are
+            really just "no real caps existed yet, so an under-trained/
+            biased classifier got to size up to 100% of capital on every
+            call" -- i.e. misrepresenting classifier skill (or the lack of
+            it) as if it were a finding about risk-taking. Replace this
+            with real Layer 10 sizing logic in Phase 3; do not read
+            anything from this number itself as a risk-management claim.
         """
         if not feature_cols:
             raise ValueError("feature_cols must be non-empty.")
@@ -121,6 +142,7 @@ class PredictiveCoreStrategy:
         self._distance_threshold: Optional[float] = None
         self._direction_model = None
         self._magnitude_models = None
+        self._direction_result = None  # DirectionFoldResult -- see diagnostics()
         self._fitted = False
 
     # ------------------------------------------------------------------ #
@@ -135,6 +157,9 @@ class PredictiveCoreStrategy:
         missing = required - set(val_df.columns)
         if missing:
             raise ValueError(f"val_df missing required columns: {sorted(missing)}")
+
+        self._check_label_horizon_matches_upstream(train_df, "train_df")
+        self._check_label_horizon_matches_upstream(val_df, "val_df")
 
         # Purge trailing label-horizon overlap at both internal boundaries
         # (train/val and val/[whatever follows]) -- see module docstring.
@@ -168,6 +193,12 @@ class PredictiveCoreStrategy:
             early_stopping_rounds=self.early_stopping_rounds, random_state=self.random_state,
         )
         self._direction_model = model  # carries .calibrators_, fit on val_purged -- the correct partition
+        # Retained ONLY for diagnostics() below -- previously computed then
+        # immediately discarded, which meant the calibration/discrimination/
+        # skill-score numbers this class's whole training step already
+        # produces were structurally impossible to see in any backtest
+        # report, however good or bad the classifier's real signal was.
+        self._direction_result = direction_result
 
         magnitude_models, _ = train_quantile_regressor(
             train_purged, val_purged, val_purged,
@@ -252,6 +283,59 @@ class PredictiveCoreStrategy:
 
         return positions
 
+    def diagnostics(self) -> Optional[Dict]:
+        """
+        Component B direction-classifier diagnostics from this fold's fit(),
+        for `WalkForwardBacktester` to surface per-fold in `BacktestReport`
+        (see `harness.SignalStrategy.diagnostics`). Includes both the
+        reliability check (calibration: ECE/Brier per class) and the
+        discrimination/skill check (per-class precision/recall, and the
+        logloss skill score vs. a train-base-rate baseline) -- the second
+        group exists specifically because the first cannot, by itself,
+        catch a classifier that has just learned to parrot the training
+        set's majority class (see `predictive_core.skill_diagnostics`
+        module docstring). Returns None if fit() hasn't run yet.
+
+        NOTE on every `*_val_partition_*` field below: `fit()` calls
+        `train_direction_classifier(train_purged, val_purged, val_purged, ...)`
+        -- `val_purged` passed as BOTH `val_df` and the required `test_df`
+        argument, since the real test partition must structurally never
+        reach `fit()` (see module docstring point 1). That means these
+        fields are evaluated on the SAME rows the isotonic calibrators were
+        just fit on, not on held-out data. They are NOT out-of-sample
+        numbers and must not be read as evidence the classifier
+        generalizes -- they can only ever look as good as, or better than,
+        genuine OOS performance, never worse.
+        """
+        if self._direction_result is None:
+            return None
+        r = self._direction_result
+        return {
+            "direction_val_logloss": r.val_logloss,
+            "direction_val_partition_logloss": r.test_logloss,
+            "direction_val_partition_logloss_baseline": r.test_logloss_baseline,
+            "direction_val_partition_logloss_skill_score": r.test_logloss_skill_score,
+            "direction_val_partition_calibration": [
+                {
+                    "class_label": c.class_label,
+                    "expected_calibration_error": c.expected_calibration_error,
+                    "brier_score": c.brier_score,
+                    "n_samples": c.n_samples,
+                }
+                for c in r.calibration_reports
+            ],
+            "direction_val_partition_discrimination": [
+                {
+                    "class_label": d.class_label,
+                    "precision": d.precision,
+                    "recall": d.recall,
+                    "f1": d.f1,
+                    "support": d.support,
+                }
+                for d in r.discrimination_reports
+            ],
+        }
+
     def ensemble_weights(self) -> Optional[Dict[str, float]]:
         """No formal linear ensemble meta-model exists yet (Layer 7C,
         Phase 2) to blend Component A and B -- generate_positions() combines
@@ -264,3 +348,38 @@ class PredictiveCoreStrategy:
     def _require_fitted(self) -> None:
         if not self._fitted:
             raise RuntimeError("PredictiveCoreStrategy.fit() must be called before generate_positions().")
+
+    def _check_label_horizon_matches_upstream(self, df: pd.DataFrame, name: str) -> None:
+        """
+        Cross-check `self.label_horizon` against the `max_candles` value
+        `apply_triple_barrier` recorded in `df.attrs['label_horizon']` at
+        labeling time (see labeling.py -- a small addition made there
+        alongside this check, not in this file). `fit()` has no way to
+        independently verify `label_horizon` is correct from the data
+        alone; getting it wrong silently under- or over-purges label-
+        horizon overlap at fold boundaries (see module docstring point 4)
+        without ever raising. This makes that mismatch fail loudly instead.
+
+        If `df.attrs` doesn't carry this key, the check is SKIPPED, not
+        failed -- pandas does not guarantee `.attrs` propagation through
+        every operation (verified: `.iloc`/`.copy`/`.assign`/`.drop`/
+        boolean `.loc`/`pd.concat`-with-agreeing-inputs all preserve it in
+        the pandas version this project uses, but e.g. `pool_assets`
+        concatenating frames labeled with DIFFERENT horizons would safely
+        end up with empty `.attrs` rather than a wrong value). Absence of
+        metadata is evidence the check couldn't run, not evidence of a
+        mismatch, so it must not be treated as a failure.
+        """
+        upstream_horizon = df.attrs.get("label_horizon")
+        if upstream_horizon is None:
+            return
+        if upstream_horizon != self.label_horizon:
+            raise ValueError(
+                f"label_horizon mismatch on {name}: PredictiveCoreStrategy was configured "
+                f"with label_horizon={self.label_horizon}, but apply_triple_barrier recorded "
+                f"max_candles={upstream_horizon} in this dataframe's .attrs['label_horizon'] "
+                f"at labeling time. A mismatch here silently under- or over-purges label-"
+                f"horizon overlap at fold boundaries -- set label_horizon={upstream_horizon} "
+                f"to match, or re-run apply_triple_barrier with max_candles={self.label_horizon} "
+                f"if that was the intended horizon."
+            )

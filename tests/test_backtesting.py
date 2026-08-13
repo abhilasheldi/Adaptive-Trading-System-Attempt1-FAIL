@@ -75,6 +75,9 @@ class MomentumStrategy:
     def ensemble_weights(self) -> Optional[Dict[str, float]]:
         return self._weights
 
+    def diagnostics(self) -> Optional[Dict]:
+        return None
+
 
 class FlatStrategy:
     """Never trades. Used to cheaply test bookkeeping (ensemble weights,
@@ -92,6 +95,9 @@ class FlatStrategy:
 
     def ensemble_weights(self) -> Optional[Dict[str, float]]:
         return self._weights
+
+    def diagnostics(self) -> Optional[Dict]:
+        return None
 
 
 @pytest.fixture(scope="module")

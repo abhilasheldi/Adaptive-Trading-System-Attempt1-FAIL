@@ -29,6 +29,42 @@ def apply_triple_barrier(
         Take-profit multiplier relative to ATR.
     sl_mult : float
         Stop-loss multiplier relative to ATR.
+
+        IMPORTANT, checked directly against source docs (2026-08-13): the
+        2.0/1.0 default here is NOT a MASTER_CONTEXT-specified number.
+        MASTER_CONTEXT.docx, the Adaptive Probabilistic Trade Management
+        System spec, and the Prompt Playbook were all searched for
+        "tp_mult"/"sl_mult"/"triple barrier"/"reward:risk" and none specify
+        this ratio -- the Prompt Playbook's actual Component B build
+        instruction only says "a calibrated direction classifier," with no
+        mandated labeling method or barrier geometry at all. The one
+        reward:risk figure that does appear in the source docs (an
+        illustrative "Reward:Risk: 1.2:1" in a mocked-up live-trade output
+        example) describes a DIFFERENT, later-pipeline-stage concept (a
+        live trade's actual entry/stop/target after the full EV/sizing
+        pipeline) and isn't even the same number. 2.0/1.0 is an
+        implementation-time default with no cited empirical or spec-driven
+        justification anywhere in this project's history.
+
+        This matters mechanically, not just as a provenance footnote: for a
+        directionless (no real edge) local random walk, the classic
+        gambler's-ruin first-passage result gives P(hit TP first) =
+        sl_mult / (tp_mult + sl_mult) = 1/3 for this default -- i.e. a
+        ~33%/67% up/down split is exactly what pure noise would produce
+        under THIS specific ratio, with zero real market signal required.
+        Empirically observed on real BTC 2023-2026: 33.6% up / 65.8% down
+        -- matching the noise-only prediction almost exactly. See
+        docs/project_state.md (2026-08-13 entries) for the full
+        investigation this derives from. Do not casually retune this value
+        chasing better backtest numbers -- because it defines what the
+        label itself means, tuning it against any data that later becomes
+        part of a walk-forward test/val fold is a more fundamental leak
+        than ordinary hyperparameter tuning (it changes the ground truth
+        the split is built around, not just a model fit to that ground
+        truth). Any change should be decided from first principles (e.g.
+        empirical excursion distributions from a data slice that is never
+        touched again) or via a pre-registered, held-out comparison across
+        a small fixed candidate set -- not an ad hoc sweep.
     max_candles : int
         Vertical barrier (maximum holding period in candles).
     neutral_zone_atr : float
@@ -184,6 +220,20 @@ def apply_triple_barrier(
     result["direction"] = labels_df["direction"].values
     result["magnitude"] = labels_df["magnitude"].values
     result["duration"] = labels_df["duration"].values
+
+    # Record the max_candles this call actually used, so a downstream
+    # consumer that ALSO needs to know this horizon (e.g.
+    # PredictiveCoreStrategy, which purges label-horizon overlap at fold
+    # boundaries and must be configured with a matching label_horizon) can
+    # cross-check itself against it instead of trusting a separately-
+    # configured number to happen to agree. Verified (see
+    # predictive_core_strategy.py) that pandas propagates .attrs through
+    # .iloc/.copy/.assign/.drop/boolean .loc and through pd.concat when all
+    # inputs agree -- and safely empties .attrs on concat when inputs
+    # DISAGREE, rather than silently picking one, which is why a consumer
+    # of this metadata must treat its absence as "couldn't check", not
+    # "no mismatch".
+    result.attrs["label_horizon"] = max_candles
 
     return result
 
