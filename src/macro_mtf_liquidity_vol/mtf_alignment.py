@@ -41,6 +41,7 @@ Layer 4) -- exposed as the `trade_permitted` convenience field, matching
 MASTER_CONTEXT constraint 8's six-gate requirement "MTF alignment >= 3/4".
 """
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -98,7 +99,12 @@ class MTFAlignmentResult:
     action: str  # exact table text for `score`
     trade_permitted: bool  # True iff score >= TRADE_PERMITTED_MIN_SCORE (3) -- "a trade is only considered when alignment is 3/4 or 4/4"
     dominant_direction: str  # "bullish" | "bearish" | "mixed" (tied, no majority) | "neutral" (all four non-committal)
-    confidence: float  # [0, 1] -- mean |conviction| of the timeframes contributing to `score`
+    # [0, 1] -- NET conviction toward `dominant_direction`, averaged over
+    # every non-neutral timeframe, so dissent reduces it (see
+    # `score_mtf_alignment`'s 2026-08-14 note). For a tie ("mixed") it is
+    # instead the symmetric mean |conviction| across both conflicting
+    # sides -- there is no dominant direction to be net toward.
+    confidence: float
     per_timeframe_direction: Dict[str, str]  # each input timeframe's classified "bullish"/"bearish"/"neutral"
     # No default (2026-08-13 re-audit finding): the three sibling modules'
     # analogous `reasons` fields are all required, no-default fields --
@@ -167,6 +173,21 @@ def score_mtf_alignment(
     -------
     MTFAlignmentResult
     """
+    # 2026-08-14 review: `neutral_band` was entirely unvalidated, and it
+    # governs how every reading is interpreted. A NEGATIVE band inverted the
+    # classifier's meaning -- with neutral_band=-0.5, four readings of
+    # exactly 0.0 (no directional information whatsoever) classified as a
+    # unanimous 4/4 BULLISH read with `trade_permitted=True`, i.e. "Full
+    # position size permitted", because `0.0 > -0.5`. A band >= 1.0 fails
+    # the other way, silently collapsing every possible reading to neutral
+    # and returning score=0 forever.
+    if not math.isfinite(neutral_band) or not (0.0 <= neutral_band < 1.0):
+        raise ValueError(
+            f"neutral_band must be a finite value in [0, 1), got {neutral_band}. "
+            f"Negative values invert the classifier (a zero reading would count as "
+            f"directional); values >= 1 make every reading neutral, since inputs "
+            f"are constrained to [-1, 1]."
+        )
     if len(timeframe_directions) != 4:
         raise ValueError(
             f"score_mtf_alignment requires exactly 4 timeframe readings "
@@ -222,17 +243,44 @@ def score_mtf_alignment(
     elif n_bullish > n_bearish:
         dominant_direction = "bullish"
         score = n_bullish
-        aligned_tfs = bullish_tfs
+        aligned_tfs = bullish_tfs + bearish_tfs
     else:
         dominant_direction = "bearish"
         score = n_bearish
-        aligned_tfs = bearish_tfs
+        aligned_tfs = bullish_tfs + bearish_tfs
 
-    confidence = (
-        sum(abs(timeframe_directions[tf]) for tf in aligned_tfs) / len(aligned_tfs)
-        if aligned_tfs
-        else 0.0
-    )
+    # 2026-08-14 review -- completing the 2026-08-13 fix above. That fix
+    # made the TIE branch symmetric but left the bullish/bearish branches
+    # averaging over the winning side ALONE, which discarded the magnitude
+    # of dissent entirely: {+0.2, +0.2, +0.2, -1.0} and
+    # {+0.2, +0.2, +0.2, -0.16} both reported score=3 AND confidence=0.20,
+    # so a violent opposing 1W read was indistinguishable from near-
+    # consensus, and both cleared MASTER_CONTEXT constraint 8's MTF gate at
+    # "Standard position size permitted."
+    #
+    # Confidence for a real dominant direction is now the NET conviction
+    # toward it, averaged over every non-neutral timeframe: each dissenting
+    # timeframe subtracts its own conviction. Clipped at 0, since a
+    # direction that wins on COUNT can still be outweighed on conviction
+    # (as in the -1.0 case above), and a negative confidence is not
+    # meaningful -- the score already carries the count.
+    #
+    # Unanimous readings are unchanged by this (no dissent to subtract), so
+    # the existing conviction-gradation behavior is preserved exactly.
+    # Neutral timeframes are excluded from the denominator rather than
+    # counted as zeros, matching the pre-existing convention that a
+    # non-committal timeframe is an absence of evidence, not evidence of
+    # weakness.
+    if not aligned_tfs:
+        confidence = 0.0
+    elif dominant_direction == "mixed":
+        # A tie has no dominant direction to be "net toward" -- keep the
+        # symmetric mean-|conviction| reading of how strong the conflict is.
+        confidence = sum(abs(timeframe_directions[tf]) for tf in aligned_tfs) / len(aligned_tfs)
+    else:
+        sign = 1.0 if dominant_direction == "bullish" else -1.0
+        net = sum(timeframe_directions[tf] * sign for tf in aligned_tfs) / len(aligned_tfs)
+        confidence = max(0.0, net)
 
     action = _ACTIONS[score]
     reasons = [

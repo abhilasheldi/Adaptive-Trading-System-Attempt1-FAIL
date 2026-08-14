@@ -232,3 +232,86 @@ def test_reasons_field_has_no_default_matching_sibling_modules():
             score=4, action="Full position size permitted", trade_permitted=True,
             dominant_direction="bullish", confidence=0.5, per_timeframe_direction={},
         )  # no `reasons=` -- must raise now that there's no default
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14 critical review findings
+# ------------------------------------------------------------------------ #
+
+
+def test_confidence_penalises_the_magnitude_of_dissent():
+    """
+    Regression test completing the 2026-08-13 tie-confidence fix, which was
+    applied to the "mixed" branch only. The bullish/bearish branches still
+    averaged over the winning side ALONE, discarding dissent magnitude
+    entirely: both readings below previously reported score=3 AND
+    confidence=0.20, so a violent opposing 1W read was indistinguishable
+    from near-consensus, and both cleared MASTER_CONTEXT constraint 8's MTF
+    gate at "Standard position size permitted."
+    """
+    violent_dissent = score_mtf_alignment({"1H": 0.2, "4H": 0.2, "1D": 0.2, "1W": -1.0})
+    mild_dissent = score_mtf_alignment({"1H": 0.2, "4H": 0.2, "1D": 0.2, "1W": -0.16})
+
+    assert violent_dissent.score == mild_dissent.score == 3
+    assert violent_dissent.dominant_direction == mild_dissent.dominant_direction == "bullish"
+    assert violent_dissent.confidence < mild_dissent.confidence
+    # Conviction against outweighs conviction for -> no residual confidence.
+    assert violent_dissent.confidence == 0.0
+
+
+def test_unanimous_confidence_is_unchanged_by_the_dissent_fix():
+    """The fix must not alter readings with no dissent to subtract."""
+    r = score_mtf_alignment({"1H": 0.9, "4H": 0.9, "1D": 0.9, "1W": 0.9})
+    assert r.score == 4
+    assert r.confidence == pytest.approx(0.9)
+
+
+def test_neutral_timeframes_excluded_from_confidence_denominator():
+    """
+    A non-committal timeframe is an absence of evidence, not evidence of
+    weakness -- it must not dilute confidence like a zero would.
+    """
+    r = score_mtf_alignment({"1H": 0.9, "4H": 0.9, "1D": 0.9, "1W": 0.0})
+    assert r.per_timeframe_direction["1W"] == "neutral"
+    assert r.score == 3
+    assert r.confidence == pytest.approx(0.9)  # mean of the three real reads, not 2.7/4
+
+
+def test_tie_confidence_remains_symmetric_after_the_dissent_fix():
+    """The "mixed" branch keeps its own symmetric mean-|conviction| rule --
+    a tie has no dominant direction to be net toward. Guards against the
+    dissent fix accidentally regressing the 2026-08-13 fix."""
+    a = score_mtf_alignment({"1H": 0.9, "4H": 0.9, "1D": -0.16, "1W": -0.16})
+    b = score_mtf_alignment({"1H": 0.16, "4H": 0.16, "1D": -0.9, "1W": -0.9})
+    assert a.confidence == pytest.approx(b.confidence)
+    assert a.confidence == pytest.approx((0.9 + 0.9 + 0.16 + 0.16) / 4)
+
+
+@pytest.mark.parametrize("bad_band", [-0.5, -0.01, 1.0, 1.5, float("nan"), float("inf")])
+def test_invalid_neutral_band_is_rejected(bad_band):
+    """
+    Regression test: `neutral_band` was entirely unvalidated, and it governs
+    how every reading is interpreted. See the next test for what a negative
+    band actually did.
+    """
+    with pytest.raises(ValueError, match="neutral_band"):
+        score_mtf_alignment({"1H": 0.5, "4H": 0.5, "1D": 0.5, "1W": 0.5}, neutral_band=bad_band)
+
+
+def test_negative_neutral_band_previously_turned_a_zero_signal_into_full_size():
+    """
+    The concrete failure the validation above prevents: with
+    neutral_band=-0.5, four readings of exactly 0.0 -- no directional
+    information whatsoever -- classified as a unanimous 4/4 BULLISH read
+    with trade_permitted=True ("Full position size permitted"), because
+    `0.0 > -0.5`.
+    """
+    with pytest.raises(ValueError):
+        score_mtf_alignment({"1H": 0.0, "4H": 0.0, "1D": 0.0, "1W": 0.0}, neutral_band=-0.5)
+
+
+def test_zero_neutral_band_is_allowed_as_a_boundary():
+    """0.0 is a legitimate (if aggressive) choice: every nonzero reading
+    counts as directional. Only negative values are incoherent."""
+    r = score_mtf_alignment({"1H": 0.01, "4H": 0.01, "1D": 0.01, "1W": 0.01}, neutral_band=0.0)
+    assert r.score == 4

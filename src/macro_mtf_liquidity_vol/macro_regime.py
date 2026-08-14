@@ -111,6 +111,7 @@ expansive, so the shorter MASTER_CONTEXT.md string is kept rather than
 switched.
 """
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -211,9 +212,44 @@ class MacroSignalSnapshot:
     btc_qqq_corr_20d: float
     next_high_impact_event: Optional[pd.Timestamp] = None
 
+    # Every float field feeds either a hard classification comparison or a
+    # confidence margin; none of them tolerate NaN. See __post_init__.
+    _NUMERIC_FIELDS = (
+        "dxy_20d_momentum_pct",
+        "us10y_level_pct",
+        "us10y_20d_direction_pct",
+        "vix_level",
+        "vix_5d_roc_pct",
+        "btc_dominance_20d_trend_pct",
+        "btc_qqq_corr_20d",
+    )
+
     def __post_init__(self) -> None:
         if not isinstance(self.timestamp, pd.Timestamp):
             raise TypeError("timestamp must be a pd.Timestamp.")
+
+        # NaN/inf rejection (2026-08-14 review). Previously only
+        # `btc_qqq_corr_20d` was implicitly NaN-safe (via its range check);
+        # a NaN `vix_level` passed `nan <= 0` and every downstream
+        # comparison against it silently evaluated False, so ALL hard gates
+        # failed and the classifier returned "Transitional" -- i.e. "halve
+        # position sizes", meaning the system kept trading on entirely
+        # missing macro data instead of refusing to classify. Worse, the
+        # margin scores are built on `_clip01`, and `_clip01(nan)` returned
+        # 1.0 (because `min(1.0, nan)` is 1.0 -- every NaN comparison is
+        # False), so missing inputs produced MAXIMUM margin contributions.
+        # This is a demonstrated live failure mode, not a theoretical one:
+        # docs/project_state.md records yfinance returning six entirely-NaN
+        # columns from this exact upstream pipeline.
+        for field_name in self._NUMERIC_FIELDS:
+            value = getattr(self, field_name)
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"{field_name} must be a finite number, got {value!r}. Macro "
+                    f"signals are never imputed here -- a missing upstream reading "
+                    f"must be resolved by the caller, not silently classified."
+                )
+
         if self.vix_level <= 0:
             raise ValueError(f"vix_level must be positive, got {self.vix_level}.")
         if not (-1.0 <= self.btc_qqq_corr_20d <= 1.0):
@@ -277,6 +313,20 @@ class MacroRegimeResult:
 
 
 def _clip01(x: float) -> float:
+    """
+    Clamp to [0, 1], rejecting NaN.
+
+    Defence in depth (2026-08-14 review): the plain `max(0.0, min(1.0, x))`
+    form silently maps NaN to 1.0 -- the MAXIMUM -- because every comparison
+    against NaN is False, so `min(1.0, nan)` returns 1.0. That turned a
+    missing upstream reading into a maximum-confidence margin contribution.
+    `MacroSignalSnapshot.__post_init__` now rejects non-finite inputs at the
+    boundary, which is the primary guard; this check exists so the same
+    class of bug cannot reappear via some future code path that reaches
+    `_clip01` without going through that validation.
+    """
+    if not math.isfinite(x):
+        raise ValueError(f"_clip01 received a non-finite value ({x!r}); this is a bug.")
     return max(0.0, min(1.0, x))
 
 
@@ -397,13 +447,38 @@ def classify_macro_regime(
     # risk_off_correlation_threshold (not 0, unlike Risk-On's), since that
     # threshold -- not zero -- is where Risk-Off's condition actually starts
     # being satisfied.
+    #
+    # TWO FIXES (2026-08-14 review), both to make this expression obey the
+    # rules it already stated for itself:
+    #
+    # 1. The VIX-ROC leg was `_clip01(roc / vix_spike_5d_roc_pct)`, which
+    #    reads 1.0 -- the MAXIMUM -- exactly AT the spike threshold, while
+    #    its two siblings in the same expression (the VIX-level leg and the
+    #    correlation leg) both correctly read 0.0 at their own thresholds
+    #    per the note above. A snapshot sitting at the bare minimum of all
+    #    three Risk-Off conditions therefore reported inflated confidence,
+    #    driven by a leg that should have contributed nothing. Now
+    #    normalized threshold-relative like the other two: 0 at the spike
+    #    threshold, 1 at twice it (mirroring the VIX-level leg's own
+    #    (vix - 25) / 25 shape, which is 0 at 25 and 1 at 50).
+    #
+    # 2. The two VIX legs were AVERAGED, but `vix_elevated_or_spiking` is an
+    #    OR, not an AND (unlike Risk-On's `vix_calm`, which genuinely is an
+    #    AND and is still averaged below). Averaging halved the VIX
+    #    contribution of a decisively-triggered condition -- e.g. VIX at 40
+    #    with flat ROC scored (0.6 + 0) / 2 = 0.3 despite the condition
+    #    being unambiguously met. `max()` matches the OR's semantics: the
+    #    satisfied disjunct governs.
+    risk_off_vix_margin = max(
+        _clip01((snapshot.vix_level - VIX_RISK_OFF_MIN) / VIX_RISK_OFF_MIN),
+        _clip01(
+            (snapshot.vix_5d_roc_pct - vix_spike_5d_roc_pct)
+            / max(vix_spike_5d_roc_pct, 1e-9)
+        ),
+    )
     risk_off_score = (
         _clip01(snapshot.dxy_20d_momentum_pct / confidence_scale_dxy_pct)
-        + (
-            _clip01((snapshot.vix_level - VIX_RISK_OFF_MIN) / VIX_RISK_OFF_MIN)
-            + _clip01(snapshot.vix_5d_roc_pct / vix_spike_5d_roc_pct)
-        )
-        / 2.0
+        + risk_off_vix_margin
         + _clip01(
             (snapshot.btc_qqq_corr_20d - risk_off_correlation_threshold)
             / max(1.0 - risk_off_correlation_threshold, 1e-9)

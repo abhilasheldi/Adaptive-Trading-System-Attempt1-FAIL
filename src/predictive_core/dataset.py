@@ -42,6 +42,12 @@ _FEATURE_COLUMN_PREFIXES = ("struct_", "vol_", "mom_", "volu_")
 # the way real feature_cols columns are).
 _RAW_ATR_COL = "_raw_atr_for_labeling"
 
+# Public name for that same raw-scale ATR when `keep_raw_atr=True`. Chosen to
+# sit OUTSIDE `_FEATURE_COLUMN_PREFIXES` so `feature_columns()` can never pick
+# it up as a model feature -- a raw price-scale column must never enter the
+# percentile-ranked feature set.
+RAW_ATR_COLUMN = "raw_atr"
+
 
 def feature_columns(df: pd.DataFrame) -> List[str]:
     """The exact `feature_cols` list to pass to `HistoricalAnalogEngine`,
@@ -58,6 +64,7 @@ def build_asset_modeling_frame(
     sl_mult: float = 1.0,
     max_candles: int = 48,
     neutral_zone_atr: float = 0.25,
+    keep_raw_atr: bool = False,
 ) -> pd.DataFrame:
     """
     Parameters
@@ -72,6 +79,20 @@ def build_asset_modeling_frame(
         ATR computed here for barrier levels; `predictive_core.triple_barrier`
         in config.yaml is the canonical source for tp_mult/sl_mult/max_candles
         in a real run).
+    keep_raw_atr : bool
+        When True, the raw price-scale ATR used to set the triple-barrier
+        levels is retained on the output as `RAW_ATR_COLUMN` ('raw_atr')
+        instead of being dropped. Needed by Layer 5
+        (`macro_mtf_liquidity_vol.liquidity_trap`), which measures cluster
+        distances in ATR units and therefore requires a RAW-scale ATR --
+        the percentile-ranked `vol_atr_14` feature is in [0, 1] and would
+        silently corrupt every distance it is used for.
+
+        Deliberately opt-in, defaulting False: this column is not a model
+        feature (its name is outside `_FEATURE_COLUMN_PREFIXES`, so
+        `feature_columns()` will never pick it up), and adding it
+        unconditionally would change the output shape for every existing
+        caller and test.
 
     Returns
     -------
@@ -108,4 +129,6 @@ def build_asset_modeling_frame(
         max_candles=max_candles,
         neutral_zone_atr=neutral_zone_atr,
     )
+    if keep_raw_atr:
+        return labeled.rename(columns={_RAW_ATR_COL: RAW_ATR_COLUMN})
     return labeled.drop(columns=[_RAW_ATR_COL])

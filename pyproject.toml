@@ -17,7 +17,6 @@ dependencies = [
     "vectorbt",
     "mlflow",
     "optuna",
-    "anthropic",
     "pytest",
     "ruff",
 ]

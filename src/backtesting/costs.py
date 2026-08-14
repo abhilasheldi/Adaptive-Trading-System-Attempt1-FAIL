@@ -27,6 +27,40 @@ assumptions):
    overnight UTC hours), sized from the empirical frequency and magnitude
    of abnormal candle-to-candle jumps observed in the TRAIN partition
    during those specific windows.
+
+CORRECTION (2026-08-14) -- the gap cost was unbounded and double-counted.
+The 2026-08-14 layer ablation reported max drawdowns above 1.0, meaning
+equity went NEGATIVE. Reproducing one fold end-to-end isolated the cause to
+this component: gap cost was $2,588 of a $2,696 total loss (96%), and the
+two accounting books had diverged 20x -- vectorbt's own equity showed a
+1.3% drawdown while the reported book showed 27%.
+
+Three defects, all fixed here:
+
+  (a) PER-BAR, NOT PER-SESSION. The charge was applied once per gap-prone
+      BAR held. A weekend is a single Friday-close-to-Monday-open
+      discontinuity but is 48 bars on 1h data and 2,880 on 1m data, so the
+      modelled cost scaled with the SAMPLING FREQUENCY rather than the
+      risk, and grew without bound in the holding period. Now counted per
+      contiguous SESSION crossed (`_session_starts`).
+  (b) SYMMETRIC MOVE CHARGED AS A ONE-SIDED COST. `_fit_gap_stats` measures
+      E[|jump|] via `np.abs(...)` -- a move as likely to help as to hurt.
+      Charging its full magnitude turned a zero-mean random variable into a
+      systematic drain. Only the execution-degradation share is genuinely
+      one-sided: see `DEFAULT_GAP_ADVERSE_FRACTION`.
+  (c) DOUBLE-COUNTING. The realized gap is ALREADY inside vectorbt's PnL,
+      because PnL is computed from a close series that contains the gap.
+      Deducting a separate expected gap on top charged for the same price
+      action twice. (b)'s adverse fraction is what keeps the remaining
+      charge to the execution component that PnL does NOT capture.
+
+KNOWN REMAINING LIMITATION: gap cost is still applied AFTER vectorbt has
+sized its orders, so position sizing does not see it. The two books
+therefore still diverge slightly. That divergence is now small because the
+charge itself is small -- but a full fix requires feeding holding costs
+into the simulator (or an iterative re-simulation), which this harness
+does not currently support. Do not read `equity_curve` and vectorbt's own
+`Portfolio.value()` as the same quantity.
 """
 
 from dataclasses import dataclass
@@ -34,6 +68,23 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+# Fraction of a gap's magnitude treated as a genuine one-sided cost
+# (2026-08-14). `_fit_gap_stats` measures E[|jump|], which is symmetric --
+# as likely to help as hurt -- and whose realized value is ALREADY inside
+# vectorbt's PnL, since PnL is computed from a close series that contains
+# the gap. Charging the full symmetric magnitude therefore both
+# double-counted realized price action and converted a zero-mean random
+# variable into a one-way drain. Only execution degradation across the
+# discontinuity is genuinely one-sided; 0.5 is a documented judgment call
+# (you are on the wrong side of a symmetric move half the time), NOT a
+# source-doc number.
+DEFAULT_GAP_ADVERSE_FRACTION = 0.5
+
+# An EXPECTED cost cannot exceed the position that incurs it. This is a
+# coherence bound, not a tuning knob: with per-session counting and the
+# adverse fraction it should never bind on real data.
+MAX_GAP_COST_FRAC_OF_NOTIONAL = 1.0
 
 
 @dataclass(frozen=True)
@@ -76,7 +127,14 @@ class TransactionCostModel:
         overnight_start_utc_hour: int = 0,
         overnight_end_utc_hour: int = 6,
         gap_threshold_mult: float = 3.0,
+        gap_adverse_fraction: float = DEFAULT_GAP_ADVERSE_FRACTION,
     ) -> None:
+        if not (0.0 <= gap_adverse_fraction <= 1.0):
+            raise ValueError(
+                f"gap_adverse_fraction must be in [0, 1] -- it is the share of a SYMMETRIC "
+                f"gap magnitude treated as a one-sided cost; got {gap_adverse_fraction}."
+            )
+        self.gap_adverse_fraction = gap_adverse_fraction
         if taker_fee_frac < 0:
             raise ValueError("taker_fee_frac must be non-negative.")
         if not (0.0 < spread_percentile <= 100.0):
@@ -152,6 +210,22 @@ class TransactionCostModel:
             n_train_bars=len(train_df),
         )
         return self
+
+    @staticmethod
+    def _session_starts(window_mask: np.ndarray) -> np.ndarray:
+        """First bar of each contiguous run of `window_mask` -- i.e. one entry
+        per gap-prone SESSION rather than one per bar in it.
+
+        A weekend is a single Friday-close-to-Monday-open discontinuity; it
+        is represented by 48 bars on 1h data and 2,880 on 1m data. Counting
+        bars therefore made the modelled gap cost scale with the sampling
+        frequency instead of with the underlying risk.
+        """
+        mask = np.asarray(window_mask, dtype=bool)
+        if mask.size == 0:
+            return mask
+        prev = np.concatenate([[False], mask[:-1]])
+        return mask & ~prev
 
     @staticmethod
     def _is_weekend(index: pd.DatetimeIndex) -> np.ndarray:
@@ -262,10 +336,16 @@ class TransactionCostModel:
             trades["net_return"] = pd.Series(dtype=float)
             return trades
 
-        is_weekend = self._is_weekend(bar_index)
-        is_overnight = self._is_overnight(bar_index)
-        weekend_cum = np.concatenate([[0], np.cumsum(is_weekend)])
-        overnight_cum = np.concatenate([[0], np.cumsum(is_overnight)])
+        # SESSION counting, not BAR counting (2026-08-14 fix). See this
+        # method's docstring for the full defect analysis. A weekend is ONE
+        # discontinuity regardless of how many bars represent it -- 48 on 1h
+        # data, 2,880 on 1m data. Counting bars made the charge scale with
+        # the timeframe rather than with the risk, and made it grow without
+        # bound in the holding period.
+        weekend_sessions = self._session_starts(self._is_weekend(bar_index))
+        overnight_sessions = self._session_starts(self._is_overnight(bar_index))
+        weekend_cum = np.concatenate([[0], np.cumsum(weekend_sessions)])
+        overnight_cum = np.concatenate([[0], np.cumsum(overnight_sessions)])
 
         entry_pos = bar_index.searchsorted(trades["Entry Timestamp"].to_numpy(), side="left")
         exit_pos = bar_index.searchsorted(trades["Exit Timestamp"].to_numpy(), side="right") - 1
@@ -274,10 +354,19 @@ class TransactionCostModel:
         n_weekend_held = weekend_cum[exit_pos + 1] - weekend_cum[entry_pos]
         n_overnight_held = overnight_cum[exit_pos + 1] - overnight_cum[entry_pos]
 
-        expected_gap_cost_frac = (
+        # ADVERSE FRACTION: `_fit_gap_stats` measures E[|jump|] -- a SYMMETRIC
+        # move, as likely to help as hurt, and one whose realized value is
+        # already inside vectorbt's PnL. Only the execution degradation is a
+        # genuine one-sided cost, so only that fraction is charged.
+        expected_gap_cost_frac = self.gap_adverse_fraction * (
             n_weekend_held * p.gap_frequency_weekend * p.gap_magnitude_weekend_frac
             + n_overnight_held * p.gap_frequency_overnight * p.gap_magnitude_overnight_frac
         )
+        # COHERENCE BOUND: an EXPECTED cost cannot exceed the position that
+        # incurs it. Defence in depth -- with session counting and the
+        # adverse fraction this should never bind on real data, so if it ever
+        # does, the parameters are wrong and that is worth surfacing.
+        expected_gap_cost_frac = np.minimum(expected_gap_cost_frac, MAX_GAP_COST_FRAC_OF_NOTIONAL)
 
         notional = (trades["Size"].abs() * trades["Avg Entry Price"]).to_numpy(dtype=float)
         notional_safe = np.where(notional > 0, notional, np.nan)

@@ -115,6 +115,7 @@ def backtest_report(synthetic_ohlcv):
     bt = WalkForwardBacktester(
         strategy_factory=MomentumStrategy,
         timeframe="1h",
+        min_oos_trades_per_fold=0,  # synthetic folds are far below the 200-trade production minimum
         regime_col="macro_regime",
         risk_on_label="Risk-On",
         raise_on_kill_criteria_failure=False,
@@ -384,7 +385,8 @@ def test_harness_never_fits_strategy_on_test_partition(synthetic_ohlcv):
     """Structural leak guard: the exact set of timestamps every fold's
     strategy.fit() saw must never intersect that same fold's test window."""
     bt = WalkForwardBacktester(
-        strategy_factory=MomentumStrategy, timeframe="1h", raise_on_kill_criteria_failure=False
+        strategy_factory=MomentumStrategy, timeframe="1h", min_oos_trades_per_fold=0,
+        raise_on_kill_criteria_failure=False
     )
     fitted_strategies = []
 
@@ -418,7 +420,8 @@ def test_harness_ensemble_instability_detected_end_to_end(synthetic_ohlcv):
         return FlatStrategy(w)
 
     bt = WalkForwardBacktester(
-        strategy_factory=volatile_factory, timeframe="1h", raise_on_kill_criteria_failure=False
+        strategy_factory=volatile_factory, timeframe="1h", min_oos_trades_per_fold=0,
+        raise_on_kill_criteria_failure=False
     )
     report = bt.run(synthetic_ohlcv)
     assert len(report.folds) >= 4
@@ -436,6 +439,7 @@ def test_harness_higher_taker_fee_does_not_improve_ev(synthetic_ohlcv):
         return WalkForwardBacktester(
             strategy_factory=MomentumStrategy,
             timeframe="1h",
+            min_oos_trades_per_fold=0,
             cost_model_kwargs={"taker_fee_frac": fee_bps / 10_000.0},
             min_folds=4,
             raise_on_kill_criteria_failure=False,
@@ -457,7 +461,10 @@ def test_harness_default_raises_on_kill_criteria_failure(synthetic_ohlcv):
     instead of silently returning a report, and the exception must carry
     the full per-criterion report so a caller can see exactly which
     criteria failed."""
-    bt = WalkForwardBacktester(strategy_factory=MomentumStrategy, timeframe="1h")
+    bt = WalkForwardBacktester(
+        strategy_factory=MomentumStrategy, timeframe="1h",
+        min_oos_trades_per_fold=0,  # synthetic folds are below the 200-trade production minimum
+    )
     with pytest.raises(Layer14KillCriteriaFailed) as exc_info:
         bt.run(synthetic_ohlcv)
 
@@ -475,7 +482,8 @@ def test_harness_does_not_raise_when_opted_out_or_when_criteria_pass(synthetic_o
     criterion is not_evaluated, not fail; constant ensemble weights -> that
     criterion passes) must not raise even with the default left on."""
     bt_suppressed = WalkForwardBacktester(
-        strategy_factory=MomentumStrategy, timeframe="1h", raise_on_kill_criteria_failure=False
+        strategy_factory=MomentumStrategy, timeframe="1h", min_oos_trades_per_fold=0,
+        raise_on_kill_criteria_failure=False
     )
     report = bt_suppressed.run(synthetic_ohlcv)  # must not raise
     assert report.kill_criteria.any_failed is True  # criteria did fail; just wasn't raised
@@ -486,3 +494,251 @@ def test_harness_does_not_raise_when_opted_out_or_when_criteria_pass(synthetic_o
     bt_passing = WalkForwardBacktester(strategy_factory=flat_factory, timeframe="1h")
     report_passing = bt_passing.run(synthetic_ohlcv)  # must not raise -- nothing failed
     assert report_passing.kill_criteria.any_failed is False
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14: under-powered fold exclusion + ruin detection
+# ------------------------------------------------------------------------ #
+
+
+def test_under_powered_folds_are_excluded_from_aggregate_sharpe(synthetic_ohlcv):
+    """MASTER_CONTEXT requires a minimum 200-trade out-of-sample sample. A
+    fold below that yields a Sharpe dominated by noise; averaging it into the
+    aggregate silently corrupts the headline number. The 2026-08-14 ablation
+    had folds of 46 and 12 trades feeding the same mean as folds of 1,215."""
+    strict = WalkForwardBacktester(
+        strategy_factory=MomentumStrategy, timeframe="1h",
+        min_oos_trades_per_fold=10_000_000,  # nothing can qualify
+        raise_on_kill_criteria_failure=False,
+    )
+    report = strict.run(synthetic_ohlcv)
+    assert len(report.under_powered_folds) == len(report.folds)
+    assert report.n_folds_in_aggregate_sharpe == 0
+    assert np.isnan(report.aggregate_oos_sharpe)
+    # Folds are still reported individually -- excluded from the MEAN only.
+    assert len(report.folds) >= 4
+
+
+def test_opting_out_of_the_minimum_includes_every_fold(synthetic_ohlcv):
+    lenient = WalkForwardBacktester(
+        strategy_factory=MomentumStrategy, timeframe="1h",
+        min_oos_trades_per_fold=0, raise_on_kill_criteria_failure=False,
+    )
+    report = lenient.run(synthetic_ohlcv)
+    assert report.under_powered_folds == []
+    assert report.n_folds_in_aggregate_sharpe > 0
+
+
+def test_pooled_profit_factor_still_uses_every_trade(synthetic_ohlcv):
+    """Pooling is sample-weighted by construction, so a small fold
+    contributes its trades rather than an equal-weighted statistic. Only the
+    Sharpe MEAN needs the exclusion."""
+    strict = WalkForwardBacktester(
+        strategy_factory=MomentumStrategy, timeframe="1h",
+        min_oos_trades_per_fold=10_000_000, raise_on_kill_criteria_failure=False,
+    )
+    lenient = WalkForwardBacktester(
+        strategy_factory=MomentumStrategy, timeframe="1h",
+        min_oos_trades_per_fold=0, raise_on_kill_criteria_failure=False,
+    )
+    a = strict.run(synthetic_ohlcv)
+    b = lenient.run(synthetic_ohlcv)
+    assert a.aggregate_oos_profit_factor == pytest.approx(b.aggregate_oos_profit_factor, nan_ok=True)
+    assert a.aggregate_oos_max_drawdown == pytest.approx(b.aggregate_oos_max_drawdown, nan_ok=True)
+
+
+def test_summary_discloses_excluded_folds(synthetic_ohlcv):
+    strict = WalkForwardBacktester(
+        strategy_factory=MomentumStrategy, timeframe="1h",
+        min_oos_trades_per_fold=10_000_000, raise_on_kill_criteria_failure=False,
+    )
+    text = strict.run(synthetic_ohlcv).summary()
+    assert "EXCLUDED under-powered fold" in text
+
+
+def test_min_oos_trades_per_fold_rejects_negative():
+    with pytest.raises(ValueError):
+        WalkForwardBacktester(
+            strategy_factory=MomentumStrategy, timeframe="1h", min_oos_trades_per_fold=-1
+        )
+
+
+def test_ruin_detection_disqualifies_sharpe_and_is_reported():
+    """Sharpe over a non-positive equity curve is arithmetically meaningless
+    (the pct_change denominator crosses zero). The 2026-08-14 ablation
+    reported maxDD 1.023 -- equity below zero -- alongside a Sharpe that
+    looked BETTER than the solvent baseline. That must never be publishable."""
+    from src.backtesting import metrics
+
+    idx = pd.date_range("2024-01-01", periods=500, freq="h", tz="UTC")
+    # Cumulative losses far exceeding init_cash -> equity crosses zero.
+    pnls = pd.Series(np.full(500, -50.0), index=idx)
+    eq = metrics.equity_curve_from_trade_pnls(pnls, pd.Series(idx), idx, 10_000.0)
+    assert (eq <= 0).any()
+    assert metrics.max_drawdown(eq) > 1.0  # >1.0 is the signature of negative equity
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14: predictive-core skill diagnostic (NOT a sixth Layer 14 criterion)
+# ------------------------------------------------------------------------ #
+
+
+def test_no_skill_core_dominating_the_ensemble_is_flagged():
+    """The 2026-08-14 ablation fitted component_b = 0.942 while that signal's
+    logloss skill score sat at 0.004-0.016 -- a no-skill signal carrying 94%
+    of the blend. That means there is nothing to blend, so tuning cannot
+    recover it."""
+    from src.backtesting.kill_criteria import evaluate_predictive_core_skill
+
+    d = evaluate_predictive_core_skill(
+        0.010,
+        {"component_b": 0.942378, "component_a": 0.032093, "mtf_alignment": 0.012764,
+         "macro_regime": 0.012764, "liquidity_trap": 0.0},
+    )
+    assert d.flagged is True
+    assert d.dominant_signal == "component_b"
+    assert d.dominant_weight == pytest.approx(0.942378)
+    assert "revise the EDGE HYPOTHESIS" in d.detail
+    assert "CANNOT recover" in d.detail
+
+
+def test_a_core_with_real_skill_is_not_flagged():
+    from src.backtesting.kill_criteria import evaluate_predictive_core_skill
+
+    d = evaluate_predictive_core_skill(0.25, {"component_b": 0.6, "component_a": 0.4})
+    assert d.flagged is False
+    assert "measurable skill" in d.detail
+
+
+def test_skill_diagnostic_reports_not_evaluated_without_a_score():
+    from src.backtesting.kill_criteria import evaluate_predictive_core_skill
+
+    d = evaluate_predictive_core_skill(float("nan"))
+    assert d.flagged is False
+    assert "NOT EVALUATED" in d.detail
+
+
+def test_skill_diagnostic_dominant_signal_is_deterministic_on_ties():
+    from src.backtesting.kill_criteria import evaluate_predictive_core_skill
+
+    tied = {"component_b": 0.5, "component_a": 0.5}
+    first = evaluate_predictive_core_skill(0.0, tied).dominant_signal
+    second = evaluate_predictive_core_skill(0.0, dict(reversed(list(tied.items())))).dominant_signal
+    assert first == second == "component_a"  # alphabetical tiebreak, not dict order
+
+
+def test_skill_diagnostic_is_not_a_layer14_criterion(backtest_report):
+    """MASTER_CONTEXT specifies exactly five Layer 14 criteria. This check is
+    a diagnostic alongside them, matching how the IS/OOS overfit check is
+    handled -- it must not appear in the criteria list."""
+    report, _ = backtest_report
+    names = {c["name"] for c in report.kill_criteria.as_report()}
+    assert len(names) == 5
+    assert not any("skill" in n for n in names)
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14: gap-cost correction (unbounded / symmetric / double-counted)
+# ------------------------------------------------------------------------ #
+
+
+def _held_through_weekend(freq: str, n_days: int = 14) -> tuple:
+    """One trade held across the whole span, sampled at `freq`. Used to prove
+    the gap charge depends on SESSIONS crossed, not on sampling frequency."""
+    idx = pd.date_range("2024-01-01", periods=int(n_days * 24 * (60 / int(freq[:-3]))) if freq.endswith("min")
+                        else n_days * 24, freq=freq, tz="UTC")
+    rng = np.random.default_rng(0)
+    close = 100 * np.cumprod(1 + rng.normal(0, 0.001, len(idx)))
+    df = pd.DataFrame({"close": close, "high": close * 1.002, "low": close * 0.998}, index=idx)
+    trades = pd.DataFrame({
+        "Entry Timestamp": [idx[0]], "Exit Timestamp": [idx[-1]],
+        "Size": [1.0], "Avg Entry Price": [100.0], "PnL": [0.0],
+    })
+    return df, trades, idx
+
+
+def test_gap_cost_counts_sessions_not_bars_so_it_is_timeframe_invariant():
+    """THE core defect. A weekend is ONE Friday-close-to-Monday-open
+    discontinuity, but 48 bars on 1h data and 192 on 15m. Charging per BAR
+    made the modelled cost scale with the sampling frequency instead of the
+    risk -- and grow without bound in the holding period."""
+    df_1h, trades_1h, idx_1h = _held_through_weekend("1h")
+    df_15m, trades_15m, idx_15m = _held_through_weekend("15min")
+
+    cm_1h = TransactionCostModel().fit(df_1h)
+    cm_15m = TransactionCostModel().fit(df_15m)
+    n_1h = cm_1h._session_starts(cm_1h._is_weekend(idx_1h)).sum()
+    n_15m = cm_15m._session_starts(cm_15m._is_weekend(idx_15m)).sum()
+
+    # Same calendar span -> same number of weekend SESSIONS, regardless of freq.
+    assert n_1h == n_15m
+    # And strictly fewer than the raw bar count, which is what used to be charged.
+    assert n_1h < cm_1h._is_weekend(idx_1h).sum()
+
+
+def test_session_starts_marks_only_the_first_bar_of_each_run():
+    cm = TransactionCostModel()
+    mask = np.array([False, True, True, True, False, False, True, True, False])
+    starts = cm._session_starts(mask)
+    assert starts.tolist() == [False, True, False, False, False, False, True, False, False]
+    assert starts.sum() == 2          # two sessions
+    assert mask.sum() == 5            # five bars -- what used to be charged
+    assert cm._session_starts(np.array([], dtype=bool)).size == 0
+
+
+def test_gap_cost_does_not_grow_without_bound_in_holding_period():
+    """The unbounded accumulation directly caused negative equity: on the
+    audited fold it was $2,588 of a $2,696 total loss (96%)."""
+    df, _, idx = _held_through_weekend("1h", n_days=60)
+    cm = TransactionCostModel().fit(df)
+
+    def cost_for(days: int) -> float:
+        exit_ts = idx[min(days * 24, len(idx) - 1)]
+        trades = pd.DataFrame({
+            "Entry Timestamp": [idx[0]], "Exit Timestamp": [exit_ts],
+            "Size": [1.0], "Avg Entry Price": [100.0], "PnL": [0.0],
+        })
+        out = cm.apply_gap_cost_to_trades(trades, idx)
+        return float(out["gap_cost"].iloc[0] / (1.0 * 100.0))
+
+    # An expected cost may never exceed the position that incurs it.
+    for days in (7, 30, 59):
+        assert 0.0 <= cost_for(days) <= 1.0
+
+
+def test_gap_cost_charges_only_the_adverse_fraction_of_a_symmetric_move():
+    """`_fit_gap_stats` measures E[|jump|] -- symmetric, and already inside
+    vectorbt's PnL. Only the execution-degradation share is a real cost."""
+    df, trades, idx = _held_through_weekend("1h")
+    full = TransactionCostModel(gap_adverse_fraction=1.0).fit(df)
+    half = TransactionCostModel(gap_adverse_fraction=0.5).fit(df)
+    none = TransactionCostModel(gap_adverse_fraction=0.0).fit(df)
+
+    c_full = float(full.apply_gap_cost_to_trades(trades, idx)["gap_cost"].iloc[0])
+    c_half = float(half.apply_gap_cost_to_trades(trades, idx)["gap_cost"].iloc[0])
+    c_none = float(none.apply_gap_cost_to_trades(trades, idx)["gap_cost"].iloc[0])
+
+    assert c_none == pytest.approx(0.0)
+    assert c_half == pytest.approx(c_full * 0.5)
+
+
+def test_gap_adverse_fraction_is_validated():
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError, match="gap_adverse_fraction"):
+            TransactionCostModel(gap_adverse_fraction=bad)
+
+
+def test_gap_cost_default_is_the_documented_adverse_fraction():
+    from src.backtesting.costs import DEFAULT_GAP_ADVERSE_FRACTION, MAX_GAP_COST_FRAC_OF_NOTIONAL
+
+    assert DEFAULT_GAP_ADVERSE_FRACTION == 0.5
+    assert MAX_GAP_COST_FRAC_OF_NOTIONAL == 1.0
+    assert TransactionCostModel().gap_adverse_fraction == DEFAULT_GAP_ADVERSE_FRACTION
+
+
+def test_net_pnl_still_deducts_the_gap_cost():
+    """The correction must reduce the charge, not remove the mechanism."""
+    df, trades, idx = _held_through_weekend("1h")
+    cm = TransactionCostModel(gap_adverse_fraction=1.0).fit(df)
+    out = cm.apply_gap_cost_to_trades(trades, idx)
+    assert (out["net_pnl"] == out["PnL"] - out["gap_cost"]).all()

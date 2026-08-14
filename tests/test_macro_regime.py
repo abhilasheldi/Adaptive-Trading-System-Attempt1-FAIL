@@ -15,9 +15,12 @@ import pytest
 from src.macro_mtf_liquidity_vol.macro_regime import (
     CORRELATION_FULL_WEIGHT_THRESHOLD,
     CORRELATION_REDUCED_WEIGHT_THRESHOLD,
+    DEFAULT_RISK_OFF_CORRELATION_THRESHOLD,
+    DEFAULT_VIX_SPIKE_5D_ROC_PCT,
     VIX_RISK_OFF_MIN,
     VIX_RISK_ON_MAX,
     MacroSignalSnapshot,
+    _clip01,
     classify_macro_regime,
 )
 
@@ -310,3 +313,87 @@ def test_is_macro_event_window_flag_matches_state():
     ))
     assert non_event.is_macro_event_window is False
     assert non_event.state != "Macro-Event Window"
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14 critical review findings
+# ------------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "dxy_20d_momentum_pct",
+        "us10y_level_pct",
+        "us10y_20d_direction_pct",
+        "vix_level",
+        "vix_5d_roc_pct",
+        "btc_dominance_20d_trend_pct",
+        "btc_qqq_corr_20d",
+    ],
+)
+def test_nan_in_any_numeric_field_is_rejected(field):
+    """
+    Regression test: only `btc_qqq_corr_20d` was implicitly NaN-safe (via
+    its range check). A NaN `vix_level` passed `nan <= 0`, every downstream
+    comparison against it silently evaluated False, all hard gates
+    therefore failed, and the classifier returned "Transitional" -- i.e.
+    "halve position sizes", meaning the system kept trading on entirely
+    missing macro data. Not theoretical: docs/project_state.md records
+    yfinance returning six entirely-NaN columns from this exact pipeline.
+    """
+    with pytest.raises(ValueError, match="finite"):
+        _snapshot(**{field: float("nan")})
+
+
+def test_clip01_rejects_nan_rather_than_returning_maximum():
+    """
+    The root cause of the above: `max(0.0, min(1.0, nan))` returns 1.0 --
+    the MAXIMUM -- because every comparison against NaN is False. Missing
+    inputs therefore produced maximum-confidence margin contributions.
+    """
+    with pytest.raises(ValueError):
+        _clip01(float("nan"))
+    assert _clip01(0.5) == 0.5
+    assert _clip01(-3.0) == 0.0
+    assert _clip01(7.0) == 1.0
+
+
+def test_risk_off_confidence_is_near_zero_at_the_bare_minimum_trigger():
+    """
+    The VIX-ROC leg previously read 1.0 -- the MAXIMUM -- exactly AT the
+    spike threshold, while its two siblings in the same expression (the
+    VIX-level and correlation legs) correctly read 0.0 at their own
+    thresholds. A snapshot sitting at the bare minimum of all three
+    Risk-Off conditions therefore reported inflated confidence (0.168),
+    driven by a leg that should contribute nothing.
+    """
+    r = classify_macro_regime(_snapshot(
+        dxy_20d_momentum_pct=0.01,          # barely rising
+        vix_level=15.0,                     # calm level; Risk-Off triggers via ROC only
+        vix_5d_roc_pct=DEFAULT_VIX_SPIKE_5D_ROC_PCT,   # exactly at the spike threshold
+        btc_qqq_corr_20d=DEFAULT_RISK_OFF_CORRELATION_THRESHOLD,  # exactly at threshold
+    ))
+    assert r.state == "Risk-Off"
+    assert r.confidence < 0.02
+
+
+def test_risk_off_vix_leg_uses_or_semantics_not_an_average():
+    """
+    `vix_elevated_or_spiking` is an OR, but its two legs were AVERAGED,
+    halving the contribution of a decisively-triggered condition: VIX at 40
+    with flat ROC scored (0.6 + 0)/2 = 0.3 despite the condition being
+    unambiguously met. The satisfied disjunct must govern.
+    """
+    decisive_level = classify_macro_regime(_snapshot(
+        dxy_20d_momentum_pct=3.0, vix_level=40.0, vix_5d_roc_pct=0.0,
+        btc_qqq_corr_20d=0.95,
+    ))
+    bare_minimum = classify_macro_regime(_snapshot(
+        dxy_20d_momentum_pct=0.01, vix_level=15.0,
+        vix_5d_roc_pct=DEFAULT_VIX_SPIKE_5D_ROC_PCT,
+        btc_qqq_corr_20d=DEFAULT_RISK_OFF_CORRELATION_THRESHOLD,
+    ))
+    assert decisive_level.state == bare_minimum.state == "Risk-Off"
+    assert decisive_level.confidence > 0.7
+    assert decisive_level.confidence > bare_minimum.confidence

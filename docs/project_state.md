@@ -1456,3 +1456,814 @@ consistency validation (non-monotonic probabilities rejected, tail-flag/multipli
   historical crypto gap-frequency data — a real historical-gap-analysis pipeline would be a genuine future addition
   if this module is relied on beyond a structural placeholder.
 - Everything else carried over from prior entries is unchanged.
+
+## Session Update: Critical Review of `macro_mtf_liquidity_vol/` — 15 Findings, 13 Fixed (2026-08-14)
+
+Requested as a deliberately adversarial senior-engineer review of all four Phase 2 modules in
+`macro_mtf_liquidity_vol/`, hunting for minor bugs, code inconsistencies, and logic flaws. **Every finding below was
+empirically reproduced before being reported** (not inferred from code reading), and every fix has a dedicated
+regression test. Baseline: 93 module tests / 271 suite tests passing, **none of which caught any of this**. After:
+**312 suite tests pass** (+41 new). Zero new `ruff` errors (27 pre-existing import-ordering issues before and after,
+left alone as out of scope).
+
+### The two patterns behind almost every finding
+
+Worth recording, because they predict where to look next rather than just listing symptoms:
+
+1. **Every module validated input TYPE and RANGE but not VALIDITY, and every ambiguous case resolved toward
+permitting trading.** Findings 1, 2, 5 all failed OPEN — missing or nonsensical data produced a confident,
+tradeable classification instead of a refusal. That directly inverts MASTER_CONTEXT's stated priority order
+(capital preservation first).
+2. **Three separate findings were cases where a documented, tested bugfix addressed one instance of a bug class and
+left its mirror image in place.** `liquidity_trap.py`'s `min()` to `max()` fix swapped which false positive you get
+rather than eliminating it; `mtf_alignment.py`'s tie-confidence fix was applied to 1 of 3 branches. A fix that
+moves a bug rather than removing it is the recurring failure mode in this package.
+
+### Critical
+
+1. **`volatility_classifier.py` — Spike detection missed in-window doubling (kill-switch false negative).**
+`spike_ratio` was `recent_atr[-1] / recent_atr[-6]`: the function required 6 values but read only the 2 endpoints.
+MASTER_CONTEXT says "ATR doubles **within** 5 candles." Demonstrated: `[10, 10, 40, 20, 12, 11]` — ATR
+**quadrupled** mid-window — returned `spike_ratio=1.10` and classified **"Expanding"** ("standard position
+sizing"). Spike is simultaneously a Layer 17 kill-switch trigger, one of constraint 8's six entry gates, and the
+Risk Engine's 2.0x fat-tail multiplier, so one false negative disables all three at once. *Fixed:* `spike_ratio` is
+now the maximum **run-up** ratio anywhere in the window (`max over j of ATR[j] / min(ATR[i] for i <= j)`).
+Deliberately order-aware, not a naive `max/min`: a window that starts high and falls has `max/min = 4.0` but
+contains no doubling at all — a pure decline is the opposite of a spike, and is tested for explicitly.
+**NOT changed, flagged for a separate scoped task:** `feature_calculator.py:224`'s `vol_spike` uses the same old
+endpoint-only formula. That flag is a *model input feature*, not the gating path, so the safety-critical path is the
+one fixed; changing `vol_spike` silently alters trained-model inputs and needs its own change with its own review.
+
+2. **NaN inputs silently produced tradeable classifications in two modules.** Root cause: `_clip01`'s
+`max(0.0, min(1.0, x))` maps NaN to **1.0 — the maximum** — because every NaN comparison is False.
+`MacroSignalSnapshot` caught NaN only on `btc_qqq_corr_20d` (incidentally, via its range check); a NaN `vix_level`
+passed `nan <= 0`, all hard gates then failed, and the classifier returned **"Transitional"** — "halve position
+sizes" — i.e. *the system kept trading on entirely missing macro data*, with both internal margin scores corrupted
+to ~max. Same class in `volatility_classifier.py`: all-NaN ATR gave **"Expanding"**, since `nan >= 2.0` is False and
+the result dataclass's `spike_ratio < 0` check is False for NaN too. **Not theoretical** — this file already
+records yfinance returning six entirely-NaN columns from this exact pipeline. *Fixed:* finite-value validation at
+every boundary (all 7 `MacroSignalSnapshot` numeric fields, the full ATR window, `VolatilityStateResult`'s
+`spike_ratio`, and liquidity_trap's current-candle + window OHLC), plus `_clip01` now raises on non-finite input as
+defence in depth. Note `liquidity_trap.py` already did this correctly (`np.isfinite`) — this was a cross-module
+inconsistency, not an unknown pattern.
+
+### High
+
+3. **`liquidity_trap.py` — an ordinary outside bar fired BOTH sweep directions; the code's stated justification was
+false.** The comment claimed both directions "can't be confirmed on the same candle in practice (would require
+closing both above AND below distinct levels)." Inverted reasoning: it requires closing *below a resistance level
+and above a support level*, which any wide-range candle closing mid-range does. Reproduced with resistance ~105 /
+support ~95 and a `high=106, low=94, close=100` bar: both branches fired and `sweep_direction` silently became
+`"bullish"` purely because that branch runs second. `ensemble.py:370` consumes `sweep_direction` as a directional
+signal scaled by `trap_probability`, so a perfectly symmetric, directionally meaningless bar was injecting a hard
+bullish lean into the meta-model. *Fixed:* a candle sweeping both sides now reports **no confirmed sweep** (the
+ensemble treats that as neutral) with the conflict recorded in `reasons` — the capital-preservation-consistent
+resolution.
+
+4. **`liquidity_trap.py` — genuine breakouts labelled as confirmed reversal sweeps.** Confirmation was tested
+against the **farthest** swept level (`max`), the most permissive possible rule. With clusters at 102 and 110, a
+`high=111, close=108` candle was reported as a confirmed **bearish** sweep despite closing decisively *above* the
+102 cluster — a bullish breakout labelled as its opposite. *Fixed:* extent (farthest level) is still what gets
+**reported**, but confirmation is now tested against the **nearest** swept level — price must be rejected back past
+*all* the liquidity it ran. The earlier `min()` bug this `max()` was introduced to fix is now properly handled by
+the `level > reference_price` position filters added later, so the nearest-level test is safe. A dedicated test
+guards against over-correcting into never detecting a sweep.
+
+5. **`mtf_alignment.py` — `neutral_band` was entirely unvalidated.** It governs how every reading is interpreted.
+With `neutral_band=-0.5`, four readings of **exactly 0.0** — no directional information whatsoever — classified as
+a unanimous **4/4 bullish** read with `trade_permitted=True` ("Full position size permitted"), clearing constraint
+8's MTF gate, because `0.0 > -0.5`. The mirror failure was silent too: `neutral_band >= 1.0` collapses every
+reading to neutral forever. *Fixed:* validated to a finite `[0, 1)`; 0.0 kept legal as a legitimate aggressive
+choice.
+
+### Medium
+
+6. **`macro_regime.py` — the Risk-Off VIX-ROC leg contradicted the normalization rule its own siblings follow.**
+The inline comment states the principle explicitly (normalize relative to the threshold, "since that threshold —
+not zero — is where Risk-Off's condition actually starts being satisfied"). The correlation leg and the VIX-*level*
+leg both correctly read 0 at their thresholds; the VIX-*ROC* leg read **1.0 — the maximum** — at its threshold, in
+the same expression. A snapshot at the bare minimum of all three Risk-Off conditions reported `confidence=0.168`
+driven by a leg that should contribute nothing. *Fixed:* now `(roc - threshold) / threshold`, mirroring the VIX-level
+leg's shape. Bare-minimum trigger now reports **0.001**.
+
+7. **`macro_regime.py` — an OR condition was scored by averaging.** `vix_elevated_or_spiking` is an OR, but its two
+legs were averaged, halving a decisively-triggered condition: VIX at 40 with flat ROC scored `(0.6+0)/2 = 0.3`.
+*Fixed:* `max()`, matching OR semantics — the satisfied disjunct governs. (Risk-On's `vix_calm` genuinely is an AND
+and correctly still averages.) That case now reports 0.811.
+
+8. **`mtf_alignment.py` — the 2026-08-13 tie-confidence fix was applied to only 1 of 3 branches.** The
+bullish/bearish branches still averaged over the winning side alone, discarding dissent magnitude entirely:
+`{+0.2,+0.2,+0.2,-1.0}` and `{+0.2,+0.2,+0.2,-0.16}` both reported **score=3 AND confidence=0.20** — a violent
+opposing 1W read indistinguishable from near-consensus, both clearing the MTF gate at "Standard position size
+permitted." *Fixed:* confidence for a real dominant direction is now **net conviction toward it**, averaged over
+every non-neutral timeframe, clipped at 0. Unanimous readings are unchanged (no dissent to subtract), neutral
+timeframes stay excluded from the denominator (absence of evidence, not evidence of weakness), and the tie branch
+keeps its own symmetric rule (a tie has no dominant direction to be net toward).
+
+9. **`liquidity_trap.py` — docstring and code disagreed about swept clusters.** The comment promises "risk that an
+**UN-SWEPT** nearby cluster gets hunted next," but `nearest_*` was computed over *all* clusters, so a pool that had
+just been consumed was still scored as pending forward risk (0.750 in the reproduction). *Fixed:* swept clusters
+are excluded; `nearest_*_cluster` now means "nearest cluster still standing," consistent with what
+`trap_probability` claims to measure. (Swept clusters remain fully visible via `reasons` and the `sweep_*` fields.)
+
+### Low / consistency
+
+10. **`liquidity_trap.py` cluster `level` was the mean of ALL proximity members**, including wicks the `respected`
+filter had just disqualified as non-touches — highs `[100.00, 100.05, 100.10]` with only the first two genuine
+reported `level=100.050` instead of `100.025`. That level also feeds `distance_atr` and the sweep-breach
+comparison, so the error propagated. *Fixed:* the all-member mean still *defines* the shared level for the respect
+test (it must — that test is what identifies the touches), but the reported level is now the mean of genuine
+touches only.
+11. **`LiquidityTrapResult` validated its sweep invariant in one direction only** — `sweep_just_confirmed=True` with
+`sweep_direction=None` ("a sweep confirmed, but in no direction") constructed silently. *Fixed:* both halves
+enforced, matching `MacroRegimeResult`'s `is_macro_event_window` treatment.
+12. **`LiquidityCluster` was the only result dataclass across all four modules with no `__post_init__`** —
+`side="banana", touch_count=-5, distance_atr=-1.0` all constructed silently. *Fixed:* full validation, including
+`touch_count >= 2` (a "cluster" is by definition "two or more wicks").
+13. **Four unvalidated tunables in `estimate_liquidity_trap`** — `lookback=0` gave an opaque `IndexError`;
+`proximity_scale_atr`/`density_saturation_touches` are divisors and raised `ZeroDivisionError` deep inside the risk
+calculation. *Fixed:* validated with clear messages.
+14. **Signature inconsistency** — the other three modules use keyword-only tunables (`*`); `estimate_liquidity_trap`
+took five positional-or-keyword params. *Fixed:* now keyword-only, matching its siblings. Safe: no production
+callers exist (only tests).
+15. **NOT fixed, deliberately:** all four modules expose `List`/`Dict` fields on `frozen=True` dataclasses, so
+`result.reasons.append(...)` mutates a "frozen" object. Converting to tuples ripples through all four modules and
+every test constructing these types — a real consistency nit, but it is not a live bug and belongs in its own
+scoped change.
+
+### Next Steps
+
+1. **The primary blocker is cleared for the planned backtest run.** Findings 2 and 5 in particular were blocking:
+feeding real macro data (which this pipeline has already been observed to return as all-NaN) through
+`classify_macro_regime` would have produced plausible-looking `Transitional` reads from garbage, and every one of
+the five Layer 14 criteria evaluated in that run would have inherited it.
+2. **`feature_calculator.py`'s `vol_spike` still needs the finding-1 fix** in its own scoped change (see above for
+why it was deliberately not bundled here).
+3. Wiring the seven Phase 2 modules into `WalkForwardBacktester`/`PredictiveCoreStrategy` remains the actual next
+build step — unchanged by this review, but now on a materially sounder base. Per the user's 2026-08-14 decision,
+**Phase 1E's "clean pass" bar now requires all five Layer 14 criteria to genuinely evaluate** (no longer just the 3
+that were computable before Layer 3/7C existed).
+4. Everything else carried over from prior entries is unchanged.
+
+
+## Session Update: `vol_spike` Corrected in `feature_calculator.py` (2026-08-14)
+
+Follow-up to the same day's `macro_mtf_liquidity_vol/` review, which fixed the Layer 6 classifier's spike detection
+but deliberately deferred the identical bug in `features.feature_calculator`'s `vol_spike` feature. Done here as its
+own scoped change, because `vol_spike` is a **model input feature** (one of the 39 columns fed to the k-NN analog
+engine's distance metric and to the LightGBM/XGBoost trainers), so changing it changes model inputs.
+
+### What it actually influences — checked before changing anything
+
+- `vol_spike` is **not consumed by name anywhere else in `src/`**. No gate, kill switch, or risk calculation reads
+  it. Verified by direct grep. The gating/kill-switch path uses `macro_mtf_liquidity_vol.volatility_classifier`,
+  which computes its own spike independently and was already fixed earlier the same day.
+- It is registered via `_FeatureSet.add_excluded`, so it is emitted as a **binary column, not percentile-ranked** —
+  it does reach the models, it just isn't re-scaled.
+- Its only downstream effect is therefore as one of 39 model input features.
+
+### The change
+
+`atr / atr.shift(5)` (endpoint-only) replaced with `_max_atr_runup_ratio`: the largest factor by which ATR rose
+from any earlier point in the trailing 6-candle window to any later one, `max over j of (atr[j] / min(atr[i] for
+i <= j))`. Implemented as vectorised shifted-series arithmetic with a running minimum — 66x faster than the
+equivalent `rolling(6).apply()`, and verified equal to it to 3e-10 with zero flag mismatches on the full 9-year
+real BTC history.
+
+### Two real bugs found while doing it, neither the one being fixed
+
+1. **`+ EPS` in the denominator perturbed every legitimate ratio downward**, so an exact 2.0x doubling evaluated to
+1.999999998 and failed the `>= 2.0` test. That also made `vol_spike` disagree with the Layer 6 classifier (which
+divides exactly, guarding with `if running_min > 0`) — i.e. the two implementations of one MASTER_CONTEXT rule
+disagreed at the exact boundary. *Found by the cross-module equivalence test, not by reading.* Fixed by
+SUBSTITUTING EPS for non-positive divisors rather than ADDING it to all of them.
+2. **`.where(running_min > 0, EPS)` silently converted warm-up NaNs into EPS** (because `NaN > 0` is also False),
+emitting a spurious ~2e9 ratio and flagging a **false spike on every series' early rows**. This one was introduced
+by fix 1 and caught immediately by the warm-up-NaN test. Fixed with `.mask(running_min <= 0, EPS)`, whose condition
+is correctly False for NaN.
+
+Also corrected an inaccurate docstring on `volatility_classifier._max_runup_ratio` written earlier the same day: it
+claimed the ratio returns "< 1.0 for a monotonically falling" window, which the code never did (it floors at 1.0).
+Same doc/code mismatch class as review finding #9 — found by auditing my own prior work.
+
+### Measured effect on real data — deliberately quantified rather than assumed
+
+Regenerated the full 39-column feature frame before and after, on both cached real datasets, and diffed
+column-by-column:
+
+- **BTC (78,381 rows): exactly one column changed — `vol_spike`, on 17 rows.** The other 38 features are
+  bit-identical.
+- **ETH (35,076 rows): exactly one column changed — `vol_spike`, on 4 rows.**
+- Every change is 0 to 1 — a **strict superset**, no detection was lost in either dataset.
+- Zero spikes in the warm-up region (confirming bug 2 above is genuinely gone).
+
+**All 21 newly-flagged candles audited individually, and all 21 are genuine**: true in-window run-up 2.00x–2.10x
+against endpoint ratios of 1.87x–1.99x, i.e. precisely the boundary cases the endpoint formula could not see. Zero
+false positives. They are real volatility events, not numerical artifacts — median hourly range 1.38% vs. 0.69%
+across all candles — and include recognisable events (the 2021-12-04 BTC flash crash, 2022-03-27, 2025-03-02).
+
+### Honest assessment of whether this is a "positive effect"
+
+**Correct and safe, but its effect on model performance will be undetectable — and that is the expected outcome,
+not a disappointment.** `vol_spike` fires on ~0.2% of candles either way (137 to 154 on BTC). A binary flag that
+rare is near-constant for a gradient booster and contributes almost nothing to a k-NN distance metric; it was never
+going to be a meaningful predictor before OR after. It correctly never appeared in the Stage 4 feature-importance
+work.
+
+One honest caveat on the severity framing from the review entry above: the synthetic demonstration case
+(`[10, 10, 40, 20, 12, 11]`, ATR quadrupling mid-window) is **more extreme than real ATR behaves**. ATR is itself a
+14-period average, so it does not whipsaw that fast — in nine years of real BTC data every missed case was marginal
+rather than dramatic. The bug was real and the fix is right, but the real-world manifestation is milder than the
+synthetic example implies.
+
+The genuine value of this change is therefore: (1) one MASTER_CONTEXT rule now has **one** definition instead of
+two divergent ones — the exact drift class that caused this bug; (2) two additional latent bugs found and fixed;
+(3) `tests/test_features.py` now exists at all.
+
+### `tests/test_features.py` created — a real gap, not just a home for these tests
+
+`features.feature_calculator` — the 39-feature module everything downstream depends on — **had no dedicated test
+file**. It was exercised only indirectly through `test_no_lookahead.py`'s shared helpers. The new file covers the
+in-window-vs-endpoint regression, order-awareness (a pure ATR decline has max/min == 4.0 but must never flag), the
+1.0 floor, window-width/aging, warm-up NaN handling, the binary-not-percentile-ranked contract, a dedicated
+no-lookahead test (mutate a future bar, assert every earlier row is bit-identical), and — most importantly — a
+**cross-module equivalence test** asserting `feature_calculator._max_atr_runup_ratio` and
+`volatility_classifier._max_runup_ratio` agree row-for-row. That test is what makes the two implementations unable
+to silently drift apart again, and it is what caught bug 1 above.
+
+Full suite: **322 passing** (was 312 after the module review, 271 before the day's work). Zero new `ruff` errors
+(8 pre-existing in `feature_calculator.py` before and after; the new test file is clean).
+
+### Open observation, not acted on
+
+At ~0.2% positive rate, `vol_spike` is arguably not earning its place as a model input feature at all — it adds a
+near-constant dimension to the k-NN distance metric. Whether to keep it as a feature (as opposed to keeping the
+Layer 6 categorical state, which is what actually gates trades) is a **design** question worth a deliberate
+decision, not a bug. Flagged rather than resolved unilaterally.
+
+
+## Session Update: Explainability Engine Rebuilt as Pure Template/Rule-Based — LLM Path Removed (2026-08-14)
+
+`src/predictive_core/explainability.py` (Layer 8) rewritten to contain **no LLM call of any kind, in any tier, on
+any path** — not in normal operation, not in a fallback, not behind a feature flag. No network I/O, no API key, no
+billing dependency. Replaces the prior version, which called the Anthropic API (Haiku-tier) to phrase each
+contribution line with a template path as fallback.
+
+### What was removed, not merely disabled
+
+`AnthropicProseGenerator`, `_build_prose_prompt`, `_extract_json_object`, `ProseGenerationError`, the
+`enable_live_api` and `prose_generator` constructor parameters, the `used_live_api` output field, the `json` import,
+and `DEFAULT_PROSE_MODEL`/`DEFAULT_PROSE_MAX_TOKENS`/`DEFAULT_PROSE_TIMEOUT_SECONDS`. Also removed `anthropic` from
+`pyproject.toml` — it was added solely for this module (see this file's Layer 8 build entry) and had zero remaining
+consumers, so leaving it declared would have kept a billing dependency in the project for nothing.
+
+Why this is better here, not just cheaper:
+- **Determinism.** A trading system's audit log must be reproducible: the same attribution input must render
+  identically forever, so a post-mortem on a losing trade reads exactly what was shown at decision time. A sampled
+  language model cannot guarantee that.
+- **No numeric risk surface.** The old design kept numbers away from the model as defence in depth. Removing the
+  model removes the boundary's reason to exist entirely.
+- **No runtime dependency.** Explanation generation cannot fail, time out, rate-limit, or cost money at the moment
+  a trade is being evaluated.
+
+### What replaces it
+
+Prose is produced by mapping structured attribution facts onto pre-written sentence structures. Numbers are always
+inserted directly from the attribution data via format specifiers — never generated, paraphrased, or re-derived.
+
+- **Contribution lines**: `Display label (concrete detail)` — the exact shape the Adaptive doc's example uses
+  ("Macro regime (Risk-On, confidence 0.81)").
+- **A new rule-selected `Assessment:` block**, appended after the spec sections. Each sentence is chosen by an
+  explicit branch: which factor dominates (and whether it's a tie, or negligible); whether the top contributor is
+  positive or negative; which macro regime is active (all four states mapped, per Layer 3's exact table); EV
+  pass/fail; weight-stability state; data-quality degradation.
+- `spec_report_text` (the Adaptive doc's format, section-for-section) and `report_text` (spec + Assessment) are now
+  **separate output fields**, so the spec-format guarantee is independently assertable rather than entangled with
+  the added narrative.
+
+### Edge cases handled explicitly — the main practical argument for a rule-based renderer
+
+A generative model would produce fluent text for every one of these without signalling that anything was wrong:
+
+- **Attribution summing to near-zero**: below `NEGLIGIBLE_NET_LEAN_PCT` net lean, the narrative says the signals
+  substantially offset one another instead of naming a "dominant" driver of an undecided call.
+- **Ties between top contributors**: detected within `TIE_TOLERANCE_PCT` and reported *as* a tie ("carry
+  effectively equal weight… no single factor dominates"), never resolved by arbitrarily naming whichever sorted
+  first. Sorting was additionally made **total** (label as final tiebreak) so ordering cannot shift with upstream
+  dict order — a real determinism hole in the previous sort.
+- **Missing/degraded data**: new `SignalContribution.is_degraded` flag drives a dedicated "Data quality" line, so a
+  well-founded contribution is distinguishable from one standing on a gap. An invalid Component A also renders the
+  CI as "unavailable" rather than fabricating an interval.
+- **Weight instability flagged mid-explanation**: surfaced as an explicit **leading** caveat, not a footnote —
+  when weights are unstable the attribution percentages are themselves the quantity under suspicion, so a reader
+  must not take the breakdown at face value.
+
+Also added: `net_lean_pct()`, which reads conviction from `EnsembleForecast`'s own probabilities rather than by
+summing the rendered lines. Those are display-filtered, so summing them would understate conviction whenever small
+contributions were dropped — a subtle trap the narrative would otherwise have fallen into.
+
+### Done-when bars, all four verified
+
+1. **No external call.** Grepping the module for `api`/`anthropic`/`claude`/`requests`/`httpx`/`urllib` returns
+   five hits, **all in docstring prose explaining the removal** — zero in executable code. Verified by three tests
+   that strip comments/docstrings before asserting, restrict the import set to
+   `{math, dataclasses, typing, numpy, src}`, and reload the module asserting `anthropic`/`httpx`/`requests` are
+   absent from `sys.modules`. The full 13-module dependency chain was grepped directly: **no project module in it
+   imports a network package.** (`socket`/`urllib` do appear in `sys.modules` — confirmed by direct test to come
+   from numpy/pandas themselves, as in any scientific Python stack, not from project code.)
+2. **Format matches the spec section-for-section**, asserted on section *order* as well as presence, plus a regex
+   on the contribution-line shape and a check that the percentage column is right-aligned.
+3. **Determinism**: 25 identical renders compared byte-for-byte, plus a variant test running all seven edge-case
+   configurations 8x each, a reversed-input-order test proving tie ordering is stable, and a shared-engine test
+   proving no state accumulates between calls.
+4. **Every edge case renders readably**: a dedicated test asserts no blank field, no whitespace-only line, and a
+   non-empty narrative across six degenerate configurations.
+
+### Testing
+
+`tests/test_explainability.py` rewritten: the seven LLM-path tests (injected fake generators, fallback-on-failure,
+numeric-smuggling defence) are gone with the code they covered; everything non-LLM was kept (provable sum identity,
+Wilson CI, exact +0.15% gate with strict `>`); 25 new tests added for the four Done-when bars. **52 tests** in this
+file, full suite **345 passing** (was 322).
+
+Lint: 35 `ruff` errors vs. 31 before, all in the same three pre-existing categories (`UP006`/`UP045`/`UP035` —
+pyupgrade preferring `list[str]`/`str | None` over `typing.List`/`Optional`). The four new ones come from writing
+new annotations in the same `typing.List`/`Optional` style every sibling module in this codebase uses; fixing them
+in this file alone would make it inconsistent with its siblings, so this is left as a codebase-wide style decision
+rather than a local one.
+
+### Open item
+
+`macro_regime_state` is passed to `explain()` as an explicit optional argument rather than parsed back out of the
+macro contribution's `detail` string — reconstructing structured state from rendered text would be exactly the
+fragile coupling this project avoids. When Layer 8 is eventually wired into a real caller alongside Layers 9/10,
+that caller should pass it through from `MacroRegimeResult.state` directly. Omitting it simply skips the macro
+sentence rather than guessing.
+
+
+## Session Update: Phase 2 Partial Integration + 5-Fold Layer Ablation (2026-08-14)
+
+First walk-forward run with Phase 2 conditioning layers actually wired into the backtester, structured as a
+leave-one-out ABLATION so each layer's marginal effect is measured rather than assumed. **Layer 14 research-phase
+criteria only — the Tier 1 live gate is not evaluated anywhere in this run or this codebase.**
+
+### What got wired in (and what could not)
+
+| Layer | Status | Reason |
+|---|---|---|
+| 5 Liquidity Trap | WIRED (ensemble input) | Operates on raw OHLCV, which the modeling frame carries. |
+| 6 Volatility Regime | WIRED (gate, not ensemble input) | Its spec role is entry gate #4, not one of Layer 7C's five inputs. |
+| 7C Ensemble | WIRED | Replaces the Phase 1 hard agreement rule with the real linear blend. |
+| 3 Macro Regime | NOT WIRED | No macro data ingested (`data/raw/` is BTC/ETH OHLCV only); no economic calendar. |
+| 4 MTF Alignment | NOT WIRED | Needs 1H/4H/1D/1W; `config.yaml` has `["1h","4h"]`. Module raises rather than accept fewer. |
+| 9 Risk Engine | NOT WIRED | Needs `stop_distance_pct`/`position_size_pct` from Layers 10/11, which don't exist. |
+
+Layers 3/4 are passed to the ensemble as `None` (excluded + renormalized, the same path Component A uses when its
+N>=50 gate withholds a forecast), NOT as fabricated "neutral" results — a neutral distribution actively damps the
+blend rather than stepping out of the way.
+
+### Results — BTC/USDT 1h, 2022-08 to 2026-08, 5 folds, spec Optuna budget
+
+| variant | OOS Sharpe | PF | maxDD | trades |
+|---|---|---|---|---|
+| baseline_phase1 | -12.974 | 0.236 | 0.056 | 3502 |
+| all_layers | -8.284 | 0.014 | **1.023** | 2817 |
+| no_liquidity_trap_L5 | -8.284 | 0.014 | 1.023 | 2817 |
+| no_volatility_gate_L6 | -4.846 | 0.008 | **1.235** | 2813 |
+| no_ensemble_L7C | -12.359 | 0.238 | 0.056 | 3499 |
+
+`baseline_phase1` reproduces the documented Phase 1 result (prior entry: Sharpe -12.90, PF 0.231) to within the
+expected delta from this session's `vol_spike` correction — confirming at real-data scale that `Phase2Strategy`
+with all flags off is behaviourally identical to `PredictiveCoreStrategy`, which is what makes every ablation
+delta attributable to the layer that differs.
+
+### The Sharpe-only verdict is MISLEADING, and inverts on the other criteria
+
+The runner's automatic flag (Sharpe-only, as instructed) reports:
+- Layer 5: +0.000 (no effect) · Layer 6: **-3.438 (FLAGGED)** · Layer 7C: +4.075 (helps)
+
+That verdict is wrong about which layer is harmful, and the reason is recorded here so it isn't repeated:
+
+**`maxDD > 1.0` means the equity curve went NEGATIVE** (`drawdown = (equity - running_max)/running_max`, so
+1.023 puts equity at `-0.023 x peak`). Every variant with the ensemble enabled destroyed the account. **Sharpe
+computed over a blown-up equity curve is numerically meaningless**, which is why those Sharpe values swing wildly
+(fold 2: -9.78 vs -30.7) on a ~1-trade difference. The +4.690 "improvement" of the full stack over baseline is an
+artifact of that instability, not a real gain.
+
+### Per-layer verdicts, each verified rather than inferred
+
+**Layer 7C (Ensemble) — the genuinely destructive layer, and the Sharpe flag misses it.**
+It is the only difference between `no_ensemble_L7C` (PF 0.238, maxDD 0.056 — essentially baseline) and
+`all_layers` (PF 0.014, maxDD 1.023 — account destroyed). Mechanism, verified by inspecting fitted weights on
+real data: the ensemble assigns **component_b = 0.942**, i.e. it is ~94% Component B alone. That removes the
+Phase 1 hard agreement rule, which required Component A and B to agree before trading and was acting as a
+*filter*. Replacing a filter with a near-pure Component B read, on a classifier with near-zero measured skill,
+produces many more directional bets and wipes out the account.
+
+**Layer 5 (Liquidity Trap) — contributes exactly nothing, as configured.**
+`all_layers` and `no_liquidity_trap_L5` are byte-identical (same Sharpe to 3dp, same 2817 trades). Verified the
+cause rather than assuming a bug: the fitted ensemble weight on `liquidity_trap` is **exactly 0.000000**, so
+blending it at zero weight is arithmetically identical to excluding it and renormalizing. The optimizer
+independently learned to ignore it. Consistent with a direct measurement on real data: Layer 5 reports
+`sweep_just_confirmed` on **44.1% of bars** (197 bearish / 182 bullish — near-balanced), which is noise, not a
+rare stop-hunt event. For comparison, the earlier compression+SFP proxy selected 2.04% of candles. Layer 5's
+default `level_tolerance_atr=0.25` over a 50-candle lookback is far too permissive for 1h BTC.
+
+**Layer 6 (Volatility Gate) — UNTESTED, not "degrading", despite being the flagged layer.**
+Measured over the exact backtest window: the gate blocks **61 of 35,069 bars (0.174%)**. Per-fold trade counts
+differ by ~1 between gated and ungated runs. A layer touching 0.17% of bars cannot genuinely move Sharpe by
+3.438; that delta is numerical noise on the destroyed equity curve described above. The gate's forced-flat bars
+also *split* continuous positions, which is why the gated run shows slightly MORE trades (2817 vs 2813) — the
+initially-backwards direction, explained.
+
+### Sample-size collapse — a second reason the Sharpe numbers can't be read at face value
+
+Per-fold OOS trade counts, `all_layers`: **[1215, 1076, 468, 46, 12]** vs baseline **[1273, 1168, 616, 226, 219]**.
+Folds 4 and 5 fall to 46 and 12 trades. MASTER_CONTEXT's hypothesis requires a minimum 200-trade out-of-sample
+sample; a 12-trade fold produces a meaningless Sharpe that nonetheless enters the aggregate mean. Trade counts
+are reported alongside Sharpe in the ablation output specifically to keep this visible.
+
+### Layer 14 status — 4 of 5 criteria now evaluate (was 3)
+
+`layer14_ensemble_weight_stability` now reports **pass** (previously `not_evaluated`) for every ensemble variant —
+Layer 7C being wired in is what made it computable. `layer14_risk_on_regime_vs_aggregate` remains
+`not_evaluated` because it requires Layer 3, which cannot be wired without macro data.
+
+Every variant **fails** `layer14_oos_sharpe` and `layer14_oos_profit_factor`. The three ensemble variants also
+**fail** `layer14_oos_max_drawdown` (>25%); baseline and `no_ensemble_L7C` pass it.
+
+Per the user's 2026-08-14 decision that Phase 1E's "clean pass" requires all five criteria to genuinely evaluate,
+**1E still cannot be assessed** — one criterion remains structurally uncomputable until macro ingestion exists.
+
+### Code changes required, each with tests
+
+- `dataset.build_asset_modeling_frame(keep_raw_atr=True)` — emits `RAW_ATR_COLUMN`, needed because Layer 5
+  measures distances in ATR units and the percentile-ranked `vol_atr_14` is in [0,1].
+- `EnsembleSignalSet.macro_regime/.mtf_alignment/.liquidity_trap` are now `Optional`; `None` means "layer not
+  wired up". The raw-Layer-2-feature type guard is fully intact (None is the only permitted non-instance value).
+- **Bug found by tests**: `EnsembleMetaModel.predict()` read `signals.macro_regime.macro_weight` unconditionally
+  and raised `AttributeError` on the absent path. Now reports 0.0 (no macro conditioning applied).
+- **Bug found by tests**: `fit_ensemble_weights` RAISED on a degenerate fold (only one signal present -> flat
+  objective -> SLSQP "Inequality constraints incompatible"), which would kill an entire walk-forward run. Now
+  falls back to equal weights — correct when every weight vector is equally optimal — with `converged=False` and
+  `optimizer_message` recorded rather than applied silently.
+- New `backtesting/phase2_strategy.py` (per-layer flags; all-off proves baseline equivalence) and
+  `scripts/run_layer_ablation.py` (leave-one-out design, shared model+prediction cache).
+
+Full suite: **384 passing**.
+
+### Next Steps
+
+1. **Do not keep Layer 7C in this form.** It is the destructive layer. The Phase 1 agreement rule was acting as a
+   filter; the ensemble removed it. Either restore an agreement/confidence gate on top of the blend, or do not
+   enable Layer 7C until Component B has measurable skill (it currently has ~none — see the Stage 1-4 entries).
+2. **Re-tune Layer 5 before drawing any conclusion about it.** A 44% confirmed-sweep rate is not a stop-hunt
+   detector. Tighten `level_tolerance_atr` / require compression, then re-measure selectivity BEFORE re-running
+   the ablation — the current run tested a mis-tuned heuristic, not the hypothesis.
+3. **Layer 6 needs a dataset where it fires** to be tested at all. At 0.174% of bars it is unfalsifiable here.
+4. **Add a composite ablation criterion.** Sharpe-only flagging demonstrably picked the wrong layer in this run.
+   Any future ablation should flag on max drawdown and profit factor too, and refuse to report a Sharpe computed
+   over an equity curve that went non-positive.
+5. Macro ingestion (Layer 3) and 1D/1W ingestion (Layer 4) remain the blockers to both a full-stack test and to
+   Phase 1E being assessable under the all-five-criteria bar.
+
+
+## Session Update: Negative-Equity Root Cause Found + Under-Powered Fold Exclusion (2026-08-14)
+
+Follow-up to the layer ablation, working the user's prioritised list. **Two items completed** (the safety audit and
+the validation-protocol fix); **three items deferred** and recorded below with everything needed to pick them up.
+
+### COMPLETED 1 — Audit: why the hard risk caps did not prevent negative equity
+
+The ablation reported max drawdowns of 1.023 and 1.235. Since `drawdown = (equity - running_max)/running_max`, a
+value above 1.0 means equity went **below zero**. MASTER_CONTEXT constraint 6 says the 2%/6%/10% caps are enforced
+"at the execution layer independent of any model output", so negative equity should be structurally unreachable.
+The audit found three distinct defects, verified by measurement rather than reasoning.
+
+**(a) There are NO execution-layer risk caps. At all.**
+Verified by direct grep of `src/backtesting/` and `src/risk_sizing_selection/`: the numbers 2%/6%/10% appear only
+inside `risk_engine.py`'s risk-SCORING logic (as inputs to a 0-100 score) and in a package `__init__.py` comment.
+Nothing in the execution path enforces anything. The only limiter that exists is
+`Phase2Strategy.max_position = 0.02`, which is defective as a cap in three separate ways:
+  - it is a **model-layer** parameter, exactly what the spec says must NOT be the thing enforcing caps;
+  - it caps position **SIZE**, not **RISK** — MASTER_CONTEXT's 2% is capital-at-risk (size x stop distance), and
+    this backtest has no stops at all, so the two quantities are not comparable;
+  - it is per-trade only. There is no correlated-direction accounting and no aggregate-exposure accounting, so the
+    6% and 10% caps have no implementation whatsoever.
+
+**(b) The equity curve has no bankruptcy floor.**
+`metrics.equity_curve_from_trade_pnls` returns `init_cash + realized.cumsum()` — an unbounded cumulative sum. Once
+cumulative losses exceed `init_cash` the curve simply goes negative; there is no ruin detection and no halt.
+Reproduced directly: 3,000 trades at -$5 each on a $10,000 account crosses zero at trade 2,000 and ends at
+-$5,000, reporting `max_drawdown = 1.500`.
+
+**(c) THE DOMINANT CAUSE — sizing and accounting are two different books, and the gap-cost model is unbounded.**
+This is the finding that actually explains the magnitude, and it was found by reproducing fold 2 of the
+`all_layers` configuration end-to-end (`scripts/diagnose_negative_equity.py`, kept):
+
+```
+max |position| = 0.020000        <- the 2% limiter WAS respected
+trades = 1151, mean notional $29
+net_pnl: mean -$2.34, sum -$2,696
+gap_cost total: $2,588           <- 96% of the entire loss
+vectorbt (sizing book):  min $9,870  maxDD = 0.013   (1.3%)
+reported (trade book) :  min $7,304  maxDD = 0.270   (27%)
+```
+
+`WalkForwardBacktester._run_segment` passes fees and slippage into `vbt.Portfolio.from_orders`, but gap costs are
+applied AFTERWARDS by `cost_model.apply_gap_cost_to_trades`. So vectorbt sizes every order at 2% of an internal
+equity that never sees gap costs, while the reported curve deducts them. Here that produced a **20x divergence**:
+vectorbt believed the account was down 1.3% while the real book was down 27%. Position size therefore never
+shrinks as the true account drains — the opposite of what percent-of-equity sizing is supposed to do.
+
+And the gap cost itself is unbounded by construction (`costs.py`):
+
+```python
+expected_gap_cost_frac = (n_weekend_held  * gap_frequency_weekend  * gap_magnitude_weekend_frac
+                        + n_overnight_held * gap_frequency_overnight * gap_magnitude_overnight_frac)
+gap_cost_value = expected_gap_cost_frac * notional
+```
+
+It is charged **once per bar held, linearly, with no cap**. `n_overnight_held` grows with the holding period, so
+`expected_gap_cost_frac` can exceed 1.0 and the "expected gap cost" can exceed the entire position value. The
+ablation's positions were held almost continuously (99.8% of bars nonzero, only 2 direction flips in fold 2), so
+holding periods were enormous and gap costs accumulated without limit. That is what turns a modest modelled loss
+into an arbitrarily large one and drives equity through zero.
+
+**Answer to "why didn't the caps prevent it": because there are no caps, the equity accounting has no floor, and
+the cost model can charge more than a position is worth.** Note this is a BACKTEST-ACCOUNTING failure, not
+evidence that a live system would blow up — but it does mean every drawdown and Sharpe number from ensemble-
+enabled variants is unusable, and that constraint 6 is entirely unimplemented.
+
+### COMPLETED 2 — Under-powered folds excluded from aggregate stats
+
+`WalkForwardBacktester` now takes `min_oos_trades_per_fold` (default **200**, MASTER_CONTEXT's exact minimum
+out-of-sample sample size). Folds below it are excluded from `aggregate_oos_sharpe` and reported on
+`BacktestReport.under_powered_folds` / `n_folds_in_aggregate_sharpe`, with the exclusion disclosed in `summary()`.
+The ablation had folds of 46 and 12 trades feeding the same equal-weighted mean as folds of 1,215.
+
+Deliberately NOT excluded from pooled profit factor or max drawdown: pooling is sample-weighted by construction
+(a 12-trade fold contributes 12 trades, not an equal-weighted statistic), and a drawdown that happened, happened.
+Only the mean-of-per-fold-Sharpes is distorted by equal-weighting a noise estimate.
+
+Existing tests were updated to pass `min_oos_trades_per_fold=0` explicitly — synthetic fixtures are far below the
+production minimum by design, matching how `windows.py` already documents test-scale configuration.
+
+**Also landed in the same edit region (partial delivery of deferred item 3 below):** `SegmentResult.equity_destroyed`
+and `BacktestReport.any_equity_destroyed`. `_run_segment` now detects `(equity_curve <= 0).any()` and forces that
+segment's Sharpe to `nan`, because `pct_change()` across a zero crossing is arithmetically meaningless. `summary()`
+prints an explicit "EQUITY DESTROYED" warning. The ablation script's own flagging is NOT yet updated — see below.
+
+Full suite: **384 passing** (26 in `test_backtesting.py`, including 6 new).
+
+### DEFERRED 1 — Treat Component B's lack of skill as a Layer 14 kill-criterion hit
+
+Not a tuning task. The ablation's fitted ensemble weights on real data were **component_b = 0.942**, and Component
+B's own diagnostics across every prior run show a logloss skill score of 0.004-0.016 versus a base-rate baseline —
+i.e. essentially no skill. A 94%-weighted signal with no skill means there is nothing to blend, so ensemble
+tuning cannot help.
+
+Per MASTER_CONTEXT's own Layer 14 criteria, OOS Sharpe < 0.5 means **"stop, revise hypothesis"** — every variant
+in the ablation failed that, plus the profit-factor criterion. The correct next action is a hypothesis revision
+(different asset, timeframe, or setup definition per Build Plan 1E), NOT another parameter sweep around a core
+that has already been shown across Stages 1-4 not to contain edge in this feature set.
+
+### DEFERRED 2 — Re-tune or respecify Layer 5's sweep-confirmation logic
+
+Measured on real BTC 1h: Layer 5 reports `sweep_just_confirmed` on **44.1% of bars** (197 bearish / 182 bullish —
+near-balanced), where the spec describes sweeps as "specific, programmatically detectable events". For scale, the
+earlier compression+SFP proxy selected **2.04%** of candles — two orders of magnitude more selective.
+
+The ensemble independently assigned Layer 5 a weight of **exactly 0.000000**, correctly identifying it as noise;
+that is why `all_layers` and `no_liquidity_trap_L5` were byte-identical. Likely culprits are
+`DEFAULT_LEVEL_TOLERANCE_ATR = 0.25` over a 50-candle lookback (clusters form on almost any 1h data) and the
+absence of any compression precondition. Related open question already noted when Layer 5 was built: the Adaptive
+doc's hypothesis section defines post-compression as "ATR at or below its 20th percentile", distinct from Layer
+6's Compressed state (<30th) — that stricter definition was never wired in. Re-measure selectivity BEFORE
+including Layer 5 in any further run; the ablation tested a mis-tuned heuristic, not the hypothesis.
+
+### DEFERRED 3 — Finish disqualifying Sharpe in the ablation harness
+
+The harness half is done (see above). Still outstanding: `scripts/run_layer_ablation.py::_format_comparison`
+still ranks and flags purely on Sharpe, which in this run picked **Layer 6** (touches 61 of 35,069 bars = 0.174%,
+so it cannot genuinely move Sharpe) over **Layer 7C** (the layer that actually destroyed the account: it is the
+only difference between `no_ensemble_L7C` at PF 0.238 / maxDD 0.056 and `all_layers` at PF 0.014 / maxDD 1.023).
+The flagging must gate on maxDD/PF sanity first and refuse to rank on Sharpe at all when
+`any_equity_destroyed` is true.
+
+### Files
+
+- `scripts/diagnose_negative_equity.py` — new, KEPT. It is the tool that isolated the two-books / unbounded-gap-cost
+  root cause and is what any fix must be re-verified against. Manual-run diagnostic, not production code.
+- `reports/layer_ablation.json` / `.log` — the ablation results these findings came from.
+
+### Next Steps
+
+1. **Fix the cost model's unbounded gap charge** and unify the two accounting books (feed gap costs into the
+   simulator, or cap the charge) — this is what makes every ensemble-variant drawdown number unusable today.
+2. **Implement constraint 6 for real**: an execution-layer cap applied by the harness to every position series
+   regardless of strategy, with correlated-direction and aggregate exposure accounting, and a bankruptcy floor.
+3. Then the three deferred items above.
+4. Only after 1-3 is a re-run of the ablation worth the compute — until the accounting is trustworthy, no Sharpe
+   or drawdown from an ensemble-enabled variant should be compared against anything.
+
+
+## Session Update: The Three Deferred Items Completed (2026-08-14)
+
+Closes the three items deferred in the previous entry. Full suite: **406 passing**.
+
+### 1. Ablation flagging now gates on solvency BEFORE Sharpe (was: deferred item 3)
+
+`scripts/run_layer_ablation.py::_format_comparison` rewritten. A variant with `equity_destroyed` (or
+`maxDD >= 1.0`, which is itself the signature of equity reaching zero) is **DISQUALIFIED**: its Sharpe is not
+printed, not ranked, and not used in any comparison. Layer verdicts are now evaluated in order — (1) does adding
+the layer destroy an otherwise-solvent run, (2) profit factor, (3) max drawdown, and only then (4) Sharpe, and
+only when both sides stayed solvent. Every flag carries its concrete reasons.
+
+Replaying the actual 2026-08-14 numbers through the corrected logic **inverts the verdict**:
+
+```
+FLAGGED: Layer 7C ensemble
+   reasons: adding it destroys the account; profit factor 0.238 -> 0.014;
+            max drawdown 0.056 -> 1.023
+```
+
+Previously the Sharpe-only rule flagged **Layer 6** — which touches 61 of 35,069 bars (0.174%) and therefore
+cannot genuinely move Sharpe — while calling Layer 7C, the layer that actually destroyed the account, a "help".
+`tests/test_layer_ablation.py::test_the_real_2026_08_14_numbers_now_flag_layer7c_not_layer6` locks this in with
+the real numbers.
+
+### 2. Layer 5 sweep detection re-tuned: 44.12% -> 11.53% of bars (was: deferred item 2)
+
+Three measurements drove this, in order, each ruling out a hypothesis:
+
+- **Cluster tolerance was NOT the cause.** Tightening `level_tolerance_atr` from 0.25 to 0.05 moved the sweep
+  rate only 44.12% -> 35.4%.
+- **A "rejection wick >= X% of candle range" test was implemented, measured, and REMOVED** — it is provably
+  redundant here. Confirmation already requires `close < swept_level < high`, which forces the rejection fraction
+  above any sane threshold; measured, it moved the rate 44.12% -> 44.35%, i.e. it never bound. The reasoning is
+  recorded as a `NOT ADDED, deliberately` comment in `liquidity_trap.py` so it is not re-added.
+- **Cluster DENSITY was the real driver.** Real BTC 1h carries a **median of 7 simultaneous resistance clusters
+  above price**, spread 0.76-3.01 ATR away (touch counts 2:1696, 3:1478, 4:917, 5:580...). With that many pools
+  at that spread, almost any upward wick sweeps something.
+
+Two new conditions, both squarely inside this layer's "equal highs/lows and wick behaviour" scope:
+
+| constant | value | why this value |
+|---|---|---|
+| `DEFAULT_MIN_PENETRATION_ATR` | 0.25 | Set EQUAL to `DEFAULT_LEVEL_TOLERANCE_ATR` on purpose, not fitted: a cluster's level is only defined to within that tolerance, so a smaller "penetration" is inside the level's own uncertainty band. |
+| `DEFAULT_MIN_SWEEP_TOUCHES` | 4 | Median cluster has 3 touches; requiring more than the median restricts sweeps to better-tested pools. A CLUSTER is still "two or more wicks" per spec — this is a separate, stricter bar for a sweep worth acting on. |
+
+Measured tradeoff curve on real BTC 1h (kept so the choice can be revisited without re-deriving it):
+
+```
+penetration  touches   sweep rate
+       0.00        2     44.12%   <- old behaviour
+       0.10        2     32.71%
+       0.10        4     21.07%
+       0.25        4     11.53%   <- new default
+       0.25        5      8.73%
+       0.25        6      5.24%
+```
+
+**Two honest caveats.** (a) There is no labelled ground truth for "how often sweeps really occur", so the 2.04%
+figure from the earlier compression+SFP proxy is a reference point, not a target — tuning to hit it would be
+fitting to an arbitrary number. (b) More importantly: **the bearish/bullish split stays near 1.0 at EVERY
+threshold tested** (197/182 at the old default, 53/46 at the new one, 24/21 at the strictest). A detector that
+stays directionally balanced no matter how selective it becomes may carry no directional information at any
+setting. That is consistent with the ensemble having assigned it weight exactly 0.000000, and it is a reason NOT
+to re-include Layer 5 in a scoring run until it is shown to carry direction, independent of selectivity.
+
+Mechanism tests now pass `min_sweep_touches=2` explicitly, isolating mechanism from tuning; 7 new selectivity
+tests cover penetration (including ATR scale-invariance), touch significance, and the validation bounds.
+
+### 3. Component B's lack of skill recorded structurally (was: deferred item 1)
+
+Added `evaluate_predictive_core_skill` / `PredictiveCoreSkillDiagnostic` to `backtesting/kill_criteria.py`,
+following the existing `OverfitDiagnostic` precedent: **explicitly a DIAGNOSTIC, not a sixth Layer 14 criterion.**
+MASTER_CONTEXT specifies exactly five and this codebase's discipline is to add checks alongside them rather than
+quietly expand the spec's list — `test_skill_diagnostic_is_not_a_layer14_criterion` asserts the criteria list
+stays at five.
+
+It flags the specific combination observed in the ablation: a signal with no measurable skill carrying most of the
+ensemble weight. On the real numbers:
+
+```
+FLAGGED: predictive-core skill score 0.0100 < 0.0200 while 'component_b' carries 94.2% of
+the ensemble weight. A no-skill signal dominating the blend means there is nothing to blend
+-- ensemble/layer tuning CANNOT recover this. Per MASTER_CONTEXT's Layer 14 response to OOS
+Sharpe < 0.5, revise the EDGE HYPOTHESIS (asset, timeframe, or setup definition), not the
+parameters.
+```
+
+`NO_SKILL_SCORE_THRESHOLD = 0.02` is a documented judgment call (a logloss skill score is fractional improvement
+over a base-rate baseline, so 0 is literally "no better than guessing base rates").
+
+**The determination itself, recorded plainly:** every one of the five ablation variants failed
+`layer14_oos_sharpe` and `layer14_oos_profit_factor`; three also failed `layer14_oos_max_drawdown`. Component B's
+skill score has sat at 0.004-0.016 across every run since Stage 1. **This is a Layer 14 kill-criterion hit and the
+correct response is hypothesis revision (Build Plan 1E: different asset, timeframe, or setup definition), not
+another parameter sweep.**
+
+### Status of the five Layer 14 criteria across the ablation
+
+| criterion | baseline | all_layers | no_L5 | no_L6 | no_L7C |
+|---|---|---|---|---|---|
+| oos_sharpe | fail | fail | fail | fail | fail |
+| oos_profit_factor | fail | fail | fail | fail | fail |
+| oos_max_drawdown | pass | fail | fail | fail | pass |
+| risk_on_regime_vs_aggregate | not_evaluated | not_evaluated | not_evaluated | not_evaluated | not_evaluated |
+| ensemble_weight_stability | not_evaluated | pass | pass | pass | not_evaluated |
+
+Still **Layer 14 research-phase only**. Tier 1 is not evaluated anywhere in this codebase.
+
+### Next Steps (unchanged in priority from the previous entry)
+
+1. **Fix the cost model's unbounded gap charge and unify the two accounting books** — still the blocker that makes
+   every ensemble-variant drawdown number unusable. See the previous entry's audit for the full mechanism.
+2. **Implement MASTER_CONTEXT constraint 6 for real** — an execution-layer cap applied by the harness to every
+   position series regardless of strategy, with correlated-direction and aggregate exposure accounting, plus a
+   bankruptcy floor.
+3. **Act on the kill-criterion hit**: revise the edge hypothesis rather than re-running the current one. Layer 5's
+   persistent directional balance (item 2 above) is additional evidence pointing the same way.
+4. Only after 1-3 is another ablation run worth the compute.
+
+
+## Session Update: Gap-Cost Bug Fixed — the Cause of Negative Equity (2026-08-14)
+
+Fixes the defect identified in this session's negative-equity audit: gap cost was **96% of the total loss** in the
+audited fold ($2,588 of $2,696), with the two accounting books diverged 20x. Full suite: **413 passing**.
+
+### Three defects, not one
+
+The audit found the charge was unbounded; working the fix showed *why* it was unbounded, and that the
+unboundedness was the least of it.
+
+**(a) Charged PER BAR, not per SESSION.** `n_weekend_held` counted every bar whose `dayofweek` was Sat/Sun. A
+weekend is a single Friday-close-to-Monday-open discontinuity, but it is 48 bars on 1h data and 2,880 on 1m. The
+modelled cost therefore scaled with the SAMPLING FREQUENCY rather than the risk, and grew without bound in the
+holding period. Fixed with `_session_starts`, which marks the first bar of each contiguous run of the window mask.
+
+**(b) A SYMMETRIC move charged as a one-sided cost.** `_fit_gap_stats` measures `E[|jump|]` — it uses
+`np.abs(...)`, so it is as likely to help as to hurt. Charging its full magnitude on every held bar converted a
+zero-mean random variable into a systematic one-way drain. Only the execution-degradation share is genuinely
+one-sided: `DEFAULT_GAP_ADVERSE_FRACTION = 0.5` (a documented judgment call — you are on the wrong side of a
+symmetric move half the time — NOT a source-doc number), exposed as a `gap_adverse_fraction` constructor
+parameter.
+
+**(c) DOUBLE-COUNTING.** This is the conceptual root. The realized gap is **already inside vectorbt's `PnL`**,
+because PnL is computed from a close series that contains the gap. Deducting a separate "expected gap cost" on top
+charged for the same price action twice. (b)'s adverse fraction is what confines the remaining charge to the
+execution component PnL does *not* capture.
+
+Also added `MAX_GAP_COST_FRAC_OF_NOTIONAL = 1.0` as a coherence bound — an EXPECTED cost cannot exceed the
+position that incurs it. With (a) and (b) fixed this should never bind; if it ever does, the parameters are wrong
+and that is worth surfacing rather than silently absorbing.
+
+### Measured effect, on the pathological case that caused the blow-up
+
+Reproduced the long-hold pattern the ablation actually produced (positions held on 99.8% of bars, 2 direction
+flips):
+
+| | gap_cost / notional per trade | book divergence | 
+|---|---|---|
+| before | median **0.1740** (17.4%) | 0.0083 |
+| after | median **0.0082** (0.82%) | 0.0003 |
+
+**21x reduction** in the charge, and the two-books divergence collapses to ~zero because the charge itself is now
+small. 17.4% of notional per trade in "expected gap cost" was never credible; 0.82% is plausible for execution
+degradation across gap-prone sessions.
+
+On a high-turnover pattern (2,934 short trades) the same fix takes gap cost from 4% to 0% of total loss — which
+explains why the pathology was invisible in ordinary runs and catastrophic in the ablation: **it scales with
+HOLDING PERIOD**, and the ensemble variants held positions almost continuously.
+
+### Testing
+
+7 new tests in `tests/test_backtesting.py`. The strongest is
+`test_gap_cost_counts_sessions_not_bars_so_it_is_timeframe_invariant`, which asserts the same calendar span yields
+the same number of charged sessions at 1h and 15m sampling — directly proving the unit defect is gone. Others
+cover `_session_starts` correctness, boundedness across 7/30/59-day holds, the adverse-fraction scaling
+(0.0 -> no charge, 0.5 -> exactly half of 1.0), parameter validation, and that `net_pnl` still deducts the charge
+(the correction reduces the cost, it does not remove the mechanism).
+
+### KNOWN REMAINING LIMITATION — do not treat as fixed
+
+Gap cost is still applied AFTER vectorbt has sized its orders, so **position sizing still does not see it** and
+the two books still diverge slightly. That divergence is now negligible (0.0003) *because the charge is small*,
+not because the architecture was fixed. A full fix requires feeding holding costs into the simulator (or an
+iterative re-simulation), which this harness does not support. `equity_curve` and `Portfolio.value()` remain two
+different quantities and must not be read as one.
+
+**Separately still unfixed: MASTER_CONTEXT constraint 6.** There are still NO execution-layer risk caps — the
+2%/6%/10% limits exist nowhere in the execution path (see the audit entry). This fix removes the mechanism that
+drove equity negative; it does not implement the safety layer that should have made negative equity unreachable
+regardless.
+
+### Run invalidation
+
+The 5-fold ablation in flight when this fix landed had already imported the old `costs.py`, so its numbers were
+computed with the bug. Since the bug accounted for 96% of the loss in the audited fold, those results could not
+answer the question they were launched for. That run was **killed and relaunched** against the corrected cost
+model. Results from before this entry (`reports/layer_ablation.json`) are superseded for anything involving
+drawdown, profit factor, or equity — the per-layer attribution logic they exercised is unaffected.

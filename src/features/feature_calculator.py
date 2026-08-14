@@ -27,6 +27,13 @@ STRUCTURAL_N_SHORT = 20
 STRUCTURAL_N_LONG = 50
 EPS = 1e-9
 
+# MASTER_CONTEXT Layer 6, exact table: "Spike | ATR doubles within 5 candles".
+# Kept as named constants so `vol_spike` and the Layer 6 classifier
+# (macro_mtf_liquidity_vol.volatility_classifier) reference the same numbers
+# rather than each carrying bare literals -- see `_max_atr_runup_ratio`.
+SPIKE_LOOKBACK_CANDLES = 5
+SPIKE_RATIO_THRESHOLD = 2.0
+
 _REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
 
 
@@ -191,6 +198,72 @@ def _calculate_structural_features(df: pd.DataFrame) -> _FeatureSet:
     return feats
 
 
+def _max_atr_runup_ratio(atr: pd.Series) -> pd.Series:
+    """Largest factor by which ATR ROSE from any earlier point in the trailing
+    `SPIKE_LOOKBACK_CANDLES`-candle window to any later one, per row:
+    `max over j of (atr[j] / min(atr[i] for i <= j))` within the window.
+
+    This implements MASTER_CONTEXT's "ATR doubles WITHIN 5 candles" (Layer 6).
+
+    CORRECTION (2026-08-14): the previous implementation was
+    `atr / atr.shift(5)` -- an ENDPOINT-ONLY comparison that silently missed
+    any doubling which occurred and then partly subsided inside the window.
+    On the full 9-year real BTC/USDT 1h history this under-detected by 17
+    candles (137 -> 154 flagged), and every one of those 17 was a genuine
+    in-window spike the old formula could not see; there were zero cases in
+    the other direction, i.e. the corrected definition is a strict superset.
+
+    ORDER-AWARE by construction, via a RUNNING minimum rather than a plain
+    window min: a window that starts high and falls (e.g. [40, 20, 10]) has
+    max/min == 4.0 but contains no doubling at all -- ATR only ever declined,
+    which is the opposite of a tail-risk spike, and must not flag.
+
+    FLOORED AT 1.0 -- a flat or falling window returns exactly 1.0 ("no
+    run-up occurred"), never less.
+
+    NO-LOOKAHEAD: built purely from `.shift(k)` with k >= 0, so row t reads
+    only rows [t - SPIKE_LOOKBACK_CANDLES, t]. Verified directly by
+    `tests/test_features.py`, which mutates a future bar and asserts every
+    value at or before the cut is bit-identical.
+
+    Deliberately equivalent to `macro_mtf_liquidity_vol.volatility_classifier
+    ._max_runup_ratio`, the scalar Layer 6 classifier form of the same rule.
+    The two are separate implementations (one vectorised over a column, one
+    scalar over a 6-value window) because the packages are independent, so a
+    test asserts they agree row-for-row on real data rather than trusting
+    convention -- these two silently diverging is exactly the bug being fixed
+    here.
+    """
+    shifts = [atr.shift(SPIKE_LOOKBACK_CANDLES - k) for k in range(SPIKE_LOOKBACK_CANDLES + 1)]
+    running_min = shifts[0]
+    best = pd.Series(1.0, index=atr.index)
+    for k in range(1, SPIKE_LOOKBACK_CANDLES + 1):
+        # Guard the divisor by SUBSTITUTING EPS for non-positive values, not
+        # by ADDING EPS to every value. The old `atr / (atr_5_shift + EPS)`
+        # form perturbed every legitimate ratio downward, so an exact 2.0x
+        # doubling evaluated to 1.999999998 and failed the `>= 2.0` test --
+        # a latent off-by-a-hair bug that also made this disagree with the
+        # Layer 6 classifier (which divides exactly, guarding with
+        # `if running_min > 0`). Caught by the cross-module equivalence test.
+        # A non-positive ATR still yields a huge ratio, i.e. flags a spike --
+        # deliberately fail-CLOSED, preserving the old behaviour, and
+        # unreachable on real data (ATR is a 14-period average of true
+        # ranges).
+        # `.mask` not `.where`: the condition must be "is a real non-positive
+        # number". `NaN <= 0` is False, so warm-up NaNs are left untouched.
+        # (`running_min.where(running_min > 0, EPS)` looks equivalent but is
+        # not -- `NaN > 0` is also False, so it would REPLACE warm-up NaNs
+        # with EPS and emit a spurious ~2e9 ratio, flagging a false spike on
+        # every series' early rows. Caught by the warm-up NaN test.)
+        denom = running_min.mask(running_min <= 0, EPS)
+        # NaN-propagating by design: np.maximum/np.minimum return NaN if
+        # either operand is NaN, so warm-up rows stay NaN and are filled
+        # with 0.0 (no spike) by the caller, exactly as before.
+        best = np.maximum(best, shifts[k] / denom)
+        running_min = np.minimum(running_min, shifts[k])
+    return best
+
+
 def _calculate_volatility_features(df: pd.DataFrame) -> _FeatureSet:
     """Volatility features (ATR percentile, BB width, rolling vol, expansion/
     compression state)."""
@@ -220,10 +293,9 @@ def _calculate_volatility_features(df: pd.DataFrame) -> _FeatureSet:
     )
     feats.add_excluded("vol_state_extended", (atr_pct_rank > 0.7).astype(float))
 
-    atr_5_shift = atr.shift(5)
-    spike_ratio = atr / (atr_5_shift + EPS)
-    vol_spike = (spike_ratio >= 2.0).astype(float)
-    vol_spike = vol_spike.fillna(0.0)  # no chained inplace assignment
+    spike_ratio = _max_atr_runup_ratio(atr)
+    vol_spike = (spike_ratio >= SPIKE_RATIO_THRESHOLD).astype(float)
+    vol_spike = vol_spike.fillna(0.0)  # warm-up rows: no spike (no chained inplace assignment)
     feats.add_excluded("vol_spike", vol_spike)
 
     return feats

@@ -11,6 +11,8 @@ equal-weight fallback actually trigger -- plus the linear-blend arithmetic,
 per-signal conversion formulas, and Component A exclusion/renormalization.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -28,6 +30,7 @@ from src.predictive_core.ensemble import (
     EnsembleMetaModel,
     EnsembleSignalSet,
     blend_signals,
+    blend_signals_detailed,
     check_weight_stability,
     equal_weights,
     fit_ensemble_weights,
@@ -679,3 +682,118 @@ def test_forecast_rejects_probabilities_not_summing_to_one():
 
 def test_direction_classes_match_boosted_core_ordering():
     assert DIRECTION_CLASSES == ("down", "neutral", "up")
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14: structurally-absent layers (Layer 3 / 4 / 5 not wired up)
+# ------------------------------------------------------------------------ #
+
+
+def test_absent_macro_and_mtf_are_excluded_and_weights_renormalized():
+    """A layer that is not wired up at all is passed as None and excluded
+    from the blend, with the remaining signals renormalized -- the same
+    treatment component_a already gets when its N>=50 gate withholds a
+    forecast. Feeding a fabricated 'neutral' result instead would actively
+    damp the blend rather than stepping out of the way."""
+    full = _signal_set()
+    partial = dataclasses.replace(full, macro_regime=None, mtf_alignment=None)
+
+    _, per_signal = blend_signals_detailed(partial, equal_weights())
+    assert set(per_signal) == {"component_a", "component_b", "liquidity_trap"}
+    assert sum(w for w, _ in per_signal.values()) == pytest.approx(1.0)
+    # Equal nominal weights (0.2 each) renormalize to 1/3 across the three present.
+    for w, _ in per_signal.values():
+        assert w == pytest.approx(1.0 / 3.0)
+
+
+def test_absent_layer_differs_from_a_present_neutral_one():
+    """The distinction the None path exists to preserve: 'not wired up' must
+    not blend identically to 'wired up and reading neutral', because a
+    neutral distribution pulls the blend toward neutral in proportion to its
+    weight."""
+    neutral_macro = _macro(state="Transitional", confidence=0.5, macro_weight=1.0)
+    present = _signal_set(macro_regime=neutral_macro)
+    absent = dataclasses.replace(present, macro_regime=None)
+
+    blended_present, _ = blend_signals_detailed(present, equal_weights())
+    blended_absent, _ = blend_signals_detailed(absent, equal_weights())
+    assert not np.allclose(blended_present, blended_absent)
+
+
+def test_absent_layers_still_reject_raw_layer2_features():
+    """The Done-when guard must survive the Optional change: None is the ONLY
+    permitted non-instance value."""
+    full = _signal_set()
+    for field_name in ("macro_regime", "mtf_alignment", "liquidity_trap"):
+        with pytest.raises(TypeError):
+            dataclasses.replace(full, **{field_name: 0.73})  # a raw feature value
+        with pytest.raises(TypeError):
+            dataclasses.replace(full, **{field_name: {"rsi_14": 55.2}})
+
+
+def test_component_a_and_b_remain_mandatory():
+    """The predictive core itself is not an optional conditioning layer."""
+    full = _signal_set()
+    for field_name in ("component_a", "component_b"):
+        with pytest.raises(TypeError):
+            dataclasses.replace(full, **{field_name: None})
+
+
+def test_weights_can_be_fit_with_layers_absent():
+    """End-to-end: the optimizer must work on a reduced signal set, which is
+    the configuration the Phase 2 partial integration actually runs in."""
+    signals, y = _informative_fold(np.random.default_rng(0))
+    reduced = [dataclasses.replace(s, macro_regime=None, mtf_alignment=None) for s in signals]
+    result = fit_ensemble_weights(reduced, y)
+    assert set(result.weights) == set(SIGNAL_NAMES)  # full vector still returned
+    assert sum(result.weights.values()) == pytest.approx(1.0)
+
+
+def test_degenerate_fold_does_not_raise_and_returns_valid_weights():
+    """A fold where only ONE signal is ever present makes the objective flat
+    in every other dimension. Whether SLSQP converges or bails on such input
+    is data-dependent, but either way it must NOT raise -- previously a
+    non-convergence killed the entire walk-forward run."""
+    rng = np.random.default_rng(3)
+    signals, y = _informative_fold(rng)
+    degenerate = [
+        dataclasses.replace(
+            s,
+            component_a=dataclasses.replace(s.component_a, is_valid=False),
+            macro_regime=None, mtf_alignment=None, liquidity_trap=None,
+        )
+        for s in signals
+    ]
+    result = fit_ensemble_weights(degenerate, y)
+    assert set(result.weights) == set(SIGNAL_NAMES)
+    assert sum(result.weights.values()) == pytest.approx(1.0)
+    assert np.isfinite(result.val_logloss)
+
+
+def test_non_convergence_falls_back_to_equal_weights_and_records_it(monkeypatch):
+    """The fallback branch itself, triggered deterministically. Equal
+    weighting is correct when every weight vector is equally optimal, but it
+    must be RECORDED (converged=False), never applied silently."""
+    import src.predictive_core.ensemble as ens
+
+    class _Failed:
+        success = False
+        message = "Inequality constraints incompatible"
+        x = np.full(len(SIGNAL_NAMES), 1.0 / len(SIGNAL_NAMES))
+        fun = float("nan")
+
+    monkeypatch.setattr(ens, "minimize", lambda *a, **k: _Failed())
+    signals, y = _informative_fold(np.random.default_rng(5))
+    result = ens.fit_ensemble_weights(signals, y)
+
+    assert result.converged is False
+    assert "Inequality constraints incompatible" in result.optimizer_message
+    assert result.weights == pytest.approx(equal_weights())
+    assert np.isfinite(result.val_logloss)  # recomputed at equal weights, not the NaN above
+
+
+def test_normal_fold_reports_converged_true():
+    signals, y = _informative_fold(np.random.default_rng(4))
+    result = fit_ensemble_weights(signals, y)
+    assert result.converged is True
+    assert result.optimizer_message is None

@@ -121,6 +121,12 @@ class SegmentResult:
     max_drawdown: float
     ev_per_trade: float
     n_trades: int
+    # True when the equity curve reached zero or below during this segment.
+    # Past that point the account is gone: every subsequent return, and any
+    # Sharpe derived from them, is arithmetically meaningless (the pct_change
+    # denominator has crossed zero). Surfaced so callers can DISQUALIFY the
+    # Sharpe rather than compare it against runs that stayed solvent.
+    equity_destroyed: bool = False
 
 
 @dataclass
@@ -144,13 +150,37 @@ class BacktestReport:
     aggregate_risk_on_sharpe: Optional[float]
     kill_criteria: Layer14KillCriteriaReport
     overfit_diagnostics: List[OverfitDiagnostic] = field(default_factory=list)
+    # Folds whose OOS trade count fell below `min_oos_trades_per_fold` and
+    # were therefore EXCLUDED from `aggregate_oos_sharpe`. See
+    # `WalkForwardBacktester.run`'s under-powered-fold handling.
+    under_powered_folds: List[int] = field(default_factory=list)
+    n_folds_in_aggregate_sharpe: int = 0
+    # True when the account was destroyed in at least one fold (equity
+    # reached zero or below). Any Sharpe computed past that point is
+    # meaningless -- see `equity_destroyed` on SegmentResult.
+    any_equity_destroyed: bool = False
 
     def summary(self) -> str:
+        sharpe_note = ""
+        if self.under_powered_folds:
+            sharpe_note = (
+                f"  [EXCLUDED under-powered fold(s) {self.under_powered_folds}; "
+                f"{self.n_folds_in_aggregate_sharpe} fold(s) in the mean]"
+            )
         lines = [
             f"Walk-forward backtest: {len(self.folds)} fold(s).",
-            f"Aggregate OOS Sharpe (mean of per-fold equity-curve Sharpe): {self.aggregate_oos_sharpe:.3f}",
+            f"Aggregate OOS Sharpe (mean of per-fold equity-curve Sharpe): "
+            f"{self.aggregate_oos_sharpe:.3f}{sharpe_note}",
             f"Aggregate OOS profit factor (pooled OOS trades): {self.aggregate_oos_profit_factor:.3f}",
             f"Aggregate OOS max drawdown (worst single fold): {self.aggregate_oos_max_drawdown:.1%}",
+        ]
+        if self.any_equity_destroyed:
+            lines.append(
+                "  *** EQUITY DESTROYED in at least one fold (equity reached <= 0). "
+                "Sharpe over a non-positive equity curve is meaningless and must not "
+                "be compared against other runs. ***"
+            )
+        lines += [
             "",
             "--- Layer 14 research-phase kill criteria (NOT the Tier 1 live gate) ---",
         ]
@@ -184,6 +214,7 @@ class WalkForwardBacktester:
         ensemble_weight_delta_threshold: float = 0.20,
         ensemble_consecutive_fold_threshold: int = 2,
         raise_on_kill_criteria_failure: bool = True,
+        min_oos_trades_per_fold: int = 200,
     ) -> None:
         self.strategy_factory = strategy_factory
         self.timeframe = timeframe
@@ -211,6 +242,12 @@ class WalkForwardBacktester:
         self.ensemble_weight_delta_threshold = ensemble_weight_delta_threshold
         self.ensemble_consecutive_fold_threshold = ensemble_consecutive_fold_threshold
         self.raise_on_kill_criteria_failure = raise_on_kill_criteria_failure
+        # Exact MASTER_CONTEXT number: the hypothesis requires "a minimum
+        # 200-trade out-of-sample sample". Folds below this are excluded from
+        # the aggregate Sharpe mean (see `run`) and reported as under-powered.
+        if min_oos_trades_per_fold < 0:
+            raise ValueError("min_oos_trades_per_fold must be non-negative.")
+        self.min_oos_trades_per_fold = min_oos_trades_per_fold
 
     def run(self, df: pd.DataFrame) -> BacktestReport:
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -245,8 +282,31 @@ class WalkForwardBacktester:
         for w in windows:
             fold_results.append(self._run_fold(df, w))
 
-        oos_sharpes = [f.out_of_sample.sharpe for f in fold_results]
-        aggregate_oos_sharpe = float(np.nanmean(oos_sharpes)) if any(not np.isnan(s) for s in oos_sharpes) else float("nan")
+        # UNDER-POWERED FOLD EXCLUSION (2026-08-14). MASTER_CONTEXT's
+        # hypothesis requires "a minimum 200-trade out-of-sample sample". A
+        # fold that produces far fewer than that yields a Sharpe dominated by
+        # noise, and averaging it into the aggregate silently corrupts the
+        # headline number: the 2026-08-14 ablation had folds of 46 and 12
+        # trades feeding the same mean as folds of 1,215. Those folds are
+        # still reported individually -- they are excluded only from the
+        # aggregate Sharpe MEAN, where a per-fold statistic with no sample
+        # behind it gets equal weight to a well-powered one.
+        #
+        # Pooled profit factor deliberately still uses ALL trades: pooling is
+        # sample-weighted by construction, so a 12-trade fold contributes 12
+        # trades rather than an equal-weighted statistic. Max drawdown also
+        # keeps every fold -- a drawdown that happened, happened.
+        under_powered = [
+            f.fold for f in fold_results
+            if f.out_of_sample.n_trades < self.min_oos_trades_per_fold
+        ]
+        eligible = [
+            f.out_of_sample.sharpe for f in fold_results
+            if f.out_of_sample.n_trades >= self.min_oos_trades_per_fold
+        ]
+        finite_eligible = [s for s in eligible if not np.isnan(s)]
+        aggregate_oos_sharpe = float(np.mean(finite_eligible)) if finite_eligible else float("nan")
+        any_equity_destroyed = any(f.out_of_sample.equity_destroyed for f in fold_results)
 
         pooled_oos_trades = pd.concat(
             [f.out_of_sample.trades for f in fold_results if not f.out_of_sample.trades.empty],
@@ -286,6 +346,9 @@ class WalkForwardBacktester:
             aggregate_risk_on_sharpe=aggregate_risk_on_sharpe,
             kill_criteria=kill_report,
             overfit_diagnostics=[f.overfit for f in fold_results],
+            under_powered_folds=under_powered,
+            n_folds_in_aggregate_sharpe=len(finite_eligible),
+            any_equity_destroyed=any_equity_destroyed,
         )
 
         if self.raise_on_kill_criteria_failure and kill_report.any_failed:
@@ -395,8 +458,22 @@ class WalkForwardBacktester:
         equity_curve = metrics.equity_curve_from_trade_pnls(
             trades["net_pnl"], trades["Exit Timestamp"], segment_df.index, self.init_cash
         )
+        # RUIN DETECTION (2026-08-14). The equity curve is a cumulative sum
+        # of realized trade PnL with no bankruptcy floor, so it can and does
+        # cross zero. Once it does, `pct_change()` is dividing by a
+        # zero-or-negative denominator and every subsequent "return" -- and
+        # any Sharpe built from them -- is arithmetically meaningless. The
+        # 2026-08-14 ablation reported maxDD of 1.023 and 1.235 (equity below
+        # zero) alongside a Sharpe that looked BETTER than the solvent
+        # baseline, which is exactly the trap this flag exists to expose.
+        equity_destroyed = bool((equity_curve <= 0).any())
+
         returns = equity_curve.pct_change().dropna()
         sharpe = metrics.sharpe_ratio_from_returns(returns, self.bars_per_year)
+        if equity_destroyed:
+            # Refuse to publish a number that cannot be compared. maxDD and
+            # profit factor remain valid and are what should be read instead.
+            sharpe = float("nan")
         pf_ratio = metrics.profit_factor(trades["net_pnl"])
         max_dd = metrics.max_drawdown(equity_curve)
         notionals = trades["Size"].abs() * trades["Avg Entry Price"]
@@ -405,7 +482,7 @@ class WalkForwardBacktester:
         return SegmentResult(
             segment=segment_name, fold=fold, trades=trades, equity_curve=equity_curve,
             returns=returns, sharpe=sharpe, profit_factor=pf_ratio, max_drawdown=max_dd,
-            ev_per_trade=ev, n_trades=len(trades),
+            ev_per_trade=ev, n_trades=len(trades), equity_destroyed=equity_destroyed,
         )
 
     # ------------------------------------------------------------------ #

@@ -332,3 +332,100 @@ def evaluate_is_oos_overfit(fold: int, is_sharpe: float, oos_sharpe: float, rati
             f"{'FLAGGED: possible overfitting' if flagged else 'ok'}"
         ),
     )
+
+
+# ------------------------------------------------------------------------ #
+# Predictive-core skill diagnostic -- NOT a sixth Layer 14 criterion
+# ------------------------------------------------------------------------ #
+
+
+# Judgment call, NOT a source-doc number. A logloss skill score is the
+# fractional improvement over a base-rate baseline, so 0 is "no better than
+# guessing the training set's class frequencies". Anything under this is
+# indistinguishable from no skill at all.
+NO_SKILL_SCORE_THRESHOLD = 0.02
+
+
+@dataclass(frozen=True)
+class PredictiveCoreSkillDiagnostic:
+    """
+    Flags when the predictive core carries essentially NO skill, and is
+    nonetheless dominating the ensemble's weight.
+
+    Deliberately a DIAGNOSTIC, not a sixth Layer 14 criterion -- MASTER_CONTEXT
+    specifies exactly five, and this module's existing discipline is to add
+    checks alongside them (see `OverfitDiagnostic`) rather than quietly
+    expand the spec's own list.
+
+    Why it exists. The 2026-08-14 layer ablation fitted ensemble weights of
+    `component_b = 0.942` on real data while Component B's own logloss skill
+    score sat at 0.004-0.016 across every run since Stage 1 -- i.e. a signal
+    with no measurable skill carrying 94% of the blend. That combination is
+    diagnostic of a specific failure: there is nothing to blend, so no amount
+    of ensemble tuning, weight re-fitting, or layer re-tuning can help. It
+    means MASTER_CONTEXT's own Layer 14 response ("OOS Sharpe < 0.5 -> STOP,
+    revise hypothesis") applies to the EDGE HYPOTHESIS, not to the
+    parameters. Surfacing it structurally keeps that conclusion from being
+    re-litigated as a tuning problem on the next run.
+    """
+
+    skill_score: float
+    dominant_signal: Optional[str]
+    dominant_weight: float
+    flagged: bool
+    detail: str
+
+
+def evaluate_predictive_core_skill(
+    skill_score: float,
+    ensemble_weights: Optional[Dict[str, float]] = None,
+    skill_threshold: float = NO_SKILL_SCORE_THRESHOLD,
+) -> PredictiveCoreSkillDiagnostic:
+    """
+    Parameters
+    ----------
+    skill_score : float
+        Component B's logloss skill score vs. a train-base-rate baseline
+        (`predictive_core.skill_diagnostics`). 0 == no better than guessing
+        the base rates; negative == worse.
+    ensemble_weights : dict, optional
+        This fold's fitted Layer 7C weights, used only to report WHICH signal
+        dominates the blend. Omitted -> the weight half of the report is
+        skipped rather than guessed.
+    """
+    if skill_score is None or np.isnan(skill_score):
+        return PredictiveCoreSkillDiagnostic(
+            skill_score=float("nan"), dominant_signal=None, dominant_weight=float("nan"),
+            flagged=False, detail="NOT EVALUATED -- no skill score supplied.",
+        )
+
+    dominant_signal: Optional[str] = None
+    dominant_weight = float("nan")
+    if ensemble_weights:
+        # Sorted by (-weight, name) so ties resolve deterministically.
+        dominant_signal, dominant_weight = sorted(
+            ensemble_weights.items(), key=lambda kv: (-kv[1], kv[0])
+        )[0]
+
+    flagged = skill_score < skill_threshold
+    if not flagged:
+        detail = (
+            f"Predictive-core skill score {skill_score:.4f} >= {skill_threshold:.4f} -> "
+            f"core carries measurable skill."
+        )
+    else:
+        weight_note = (
+            f" while '{dominant_signal}' carries {dominant_weight:.1%} of the ensemble weight"
+            if dominant_signal is not None else ""
+        )
+        detail = (
+            f"FLAGGED: predictive-core skill score {skill_score:.4f} < {skill_threshold:.4f}"
+            f"{weight_note}. A no-skill signal dominating the blend means there is nothing "
+            f"to blend -- ensemble/layer tuning CANNOT recover this. Per MASTER_CONTEXT's "
+            f"Layer 14 response to OOS Sharpe < 0.5, revise the EDGE HYPOTHESIS (asset, "
+            f"timeframe, or setup definition), not the parameters."
+        )
+    return PredictiveCoreSkillDiagnostic(
+        skill_score=skill_score, dominant_signal=dominant_signal,
+        dominant_weight=dominant_weight, flagged=flagged, detail=detail,
+    )

@@ -178,3 +178,79 @@ def test_exact_spec_constants():
     assert EXTENDED_MIN_PERCENTILE == 0.70
     assert SPIKE_LOOKBACK_CANDLES == 5
     assert SPIKE_RATIO_THRESHOLD == 2.0
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14 critical review findings
+# ------------------------------------------------------------------------ #
+
+
+def test_spike_detected_when_doubling_happens_inside_the_window_not_just_at_endpoints():
+    """
+    Regression test for the review's most severe finding. Spike detection
+    previously compared ONLY `recent_atr[-1] / recent_atr[-6]`, so a
+    doubling that occurred and then partly subsided inside the window was
+    silently missed: this exact sequence (ATR QUADRUPLED mid-window)
+    returned spike_ratio=1.10 and classified "Expanding" -- i.e. "standard
+    position sizing" -- because 11/10 is close to 1.
+
+    MASTER_CONTEXT says "ATR doubles WITHIN 5 candles", and Spike is
+    simultaneously a Layer 17 kill-switch trigger, one of constraint 8's
+    six entry gates, and the Risk Engine's 2.0x fat-tail multiplier -- a
+    false negative here fails OPEN on all three at once.
+    """
+    r = classify_volatility_state(0.50, [10.0, 10.0, 40.0, 20.0, 12.0, 11.0])
+    assert r.state == "Spike"
+    assert r.spike_ratio == pytest.approx(4.0)  # 40 / 10, the real in-window run-up
+
+
+def test_spike_ratio_is_order_aware_a_pure_decline_is_never_a_spike():
+    """
+    The fix must not be a naive max/min ratio: a window that starts high
+    and falls has max/min == 4.0 but contains no doubling at all -- ATR
+    only ever declined, the opposite of a tail-risk spike. Only genuine
+    earlier-low-to-later-high moves may count.
+    """
+    r = classify_volatility_state(0.50, [40.0, 30.0, 20.0, 15.0, 12.0, 10.0])
+    assert r.state != "Spike"
+    assert r.spike_ratio <= 1.0
+
+
+def test_spike_detected_when_the_run_up_ends_at_the_current_candle():
+    """The endpoint case the old formula did handle must still work."""
+    r = classify_volatility_state(0.50, [1.0, 1.0, 1.0, 1.0, 1.0, 2.0])
+    assert r.state == "Spike"
+
+
+def test_nan_atr_is_rejected_rather_than_silently_classified():
+    """
+    Regression test: a NaN ATR previously flowed straight through
+    (`nan >= 2.0` is False, and VolatilityStateResult's `spike_ratio < 0`
+    check is also False for NaN), so entirely missing volatility data
+    classified as "Expanding" -- "standard position sizing" on absent data.
+    """
+    with pytest.raises(ValueError, match="finite"):
+        classify_volatility_state(0.50, [float("nan")] * 6)
+
+    with pytest.raises(ValueError, match="finite"):
+        classify_volatility_state(0.50, [1.0, 1.0, float("nan"), 1.0, 1.0, 1.0])
+
+
+def test_result_rejects_non_finite_spike_ratio():
+    with pytest.raises(ValueError, match="finite"):
+        VolatilityStateResult(
+            state="Expanding", trading_implication="Active trend initiation; standard position sizing",
+            atr_percentile=0.5, spike_ratio=float("nan"), reasons=[],
+        )
+
+
+def test_all_six_window_values_are_actually_examined():
+    """
+    The function has always REQUIRED 6 values but used to read only 2.
+    Changing any interior value that creates a run-up must change the
+    outcome -- otherwise the extra values are decorative.
+    """
+    flat = classify_volatility_state(0.50, [1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    interior_spike = classify_volatility_state(0.50, [1.0, 1.0, 1.0, 3.0, 1.0, 1.0])
+    assert flat.state == "Expanding"
+    assert interior_spike.state == "Spike"

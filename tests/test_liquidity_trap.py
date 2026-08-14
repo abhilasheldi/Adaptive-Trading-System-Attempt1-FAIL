@@ -23,7 +23,13 @@ import pandas as pd
 import pytest
 
 from src.macro_mtf_liquidity_vol.liquidity_trap import (
+    DEFAULT_LEVEL_TOLERANCE_ATR,
+    DEFAULT_MIN_PENETRATION_ATR,
+    DEFAULT_MIN_SWEEP_TOUCHES,
     EQUAL_LEVEL_LOOKBACK,
+    LiquidityCluster,
+    LiquidityTrapResult,
+    _cluster_levels,
     estimate_liquidity_trap,
 )
 
@@ -153,7 +159,7 @@ def test_resistance_sweep_confirmed_when_current_candle_breaches_and_rejects():
     # Current (last) candle sweeps above the level, then closes back below it.
     _set_candle(df, len(df) - 1, high=level + 0.3, close=level - 1.0, low=level - 1.2)
 
-    r = estimate_liquidity_trap(df)
+    r = estimate_liquidity_trap(df, min_sweep_touches=2)
     assert r.sweep_just_confirmed is True
     assert r.sweep_direction == "bearish"
 
@@ -166,7 +172,7 @@ def test_support_sweep_confirmed_when_current_candle_breaches_and_rejects():
         _set_candle(df, i, low=level, close=level + 1.5, open_=level + 2.0)
     _set_candle(df, len(df) - 1, low=level - 0.3, close=level + 1.0, high=level + 1.2)
 
-    r = estimate_liquidity_trap(df)
+    r = estimate_liquidity_trap(df, min_sweep_touches=2)
     assert r.sweep_just_confirmed is True
     assert r.sweep_direction == "bullish"
 
@@ -256,3 +262,274 @@ def test_exact_spec_lookback_is_50():
     """Locks in the one exact number this layer's source docs give:
     'Equal highs and equal lows within the trailing 50 candles.'"""
     assert EQUAL_LEVEL_LOOKBACK == 50
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14 critical review findings
+# ------------------------------------------------------------------------ #
+
+
+def _two_sided_fixture() -> pd.DataFrame:
+    """Flat 100.0 canvas with a resistance cluster at 105 and a support
+    cluster at 95, so the current candle can sweep both sides."""
+    n = EQUAL_LEVEL_LOOKBACK + 1
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "vol_atr_14": 1.0},
+        index=idx,
+    )
+    for i in (10, 20):
+        _set_candle(df, i, high=105.0, close=100.0)
+    for i in (12, 22):
+        _set_candle(df, i, low=95.0, close=100.0)
+    return df
+
+
+def test_candle_sweeping_both_sides_reports_no_confirmed_sweep():
+    """
+    Regression test. The old code asserted both directions "can't be
+    confirmed on the same candle in practice (would require closing both
+    above AND below distinct levels)" -- inverted reasoning: it requires
+    closing BELOW a resistance level and ABOVE a support level, which any
+    ordinary wide-range candle closing mid-range does. Both branches fired
+    and `sweep_direction` silently became "bullish" purely because that
+    branch runs second, injecting a hard bullish lean into ensemble.py
+    (which consumes sweep_direction scaled by trap_probability) from a
+    perfectly symmetric, directionally meaningless bar.
+    """
+    df = _two_sided_fixture()
+    _set_candle(df, len(df) - 1, high=106.0, low=94.0, close=100.0)
+
+    r = estimate_liquidity_trap(df, min_sweep_touches=2)
+    assert r.sweep_just_confirmed is False
+    assert r.sweep_direction is None
+    assert any("both" in reason.lower() for reason in r.reasons)
+
+
+def test_breakout_closing_above_a_swept_level_is_not_a_confirmed_bearish_sweep():
+    """
+    Regression test: confirmation was tested against the FARTHEST swept
+    level, the most permissive possible rule. With clusters at 102 and 110,
+    a candle with high=111 closing at 108 was reported as a confirmed
+    BEARISH sweep despite closing decisively ABOVE the 102 cluster -- a
+    genuine bullish breakout through that level, labelled as its opposite.
+    """
+    n = EQUAL_LEVEL_LOOKBACK + 1
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "vol_atr_14": 1.0},
+        index=idx,
+    )
+    for i in (10, 20):
+        _set_candle(df, i, high=102.0, close=100.0)
+    for i in (12, 22):
+        _set_candle(df, i, high=110.0, close=100.0)
+    _set_candle(df, len(df) - 1, high=111.0, low=100.0, close=108.0)
+
+    r = estimate_liquidity_trap(df)
+    assert r.sweep_just_confirmed is False
+
+
+def test_genuine_single_level_sweep_is_still_confirmed():
+    """Guards against the confirmation fix over-correcting into never
+    detecting a sweep at all."""
+    n = EQUAL_LEVEL_LOOKBACK + 1
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "vol_atr_14": 1.0},
+        index=idx,
+    )
+    for i in (10, 20, 30):
+        _set_candle(df, i, high=105.0, close=100.0)
+    _set_candle(df, len(df) - 1, high=105.5, low=99.0, close=101.0)
+
+    r = estimate_liquidity_trap(df, min_sweep_touches=2)
+    assert r.sweep_just_confirmed is True
+    assert r.sweep_direction == "bearish"
+
+
+def test_just_swept_cluster_is_excluded_from_forward_trap_probability():
+    """
+    The trap_probability comment promises risk from an UN-SWEPT cluster,
+    but `nearest_*` was computed over ALL clusters -- a pool that had just
+    been consumed was still scored as pending forward risk (0.750 in this
+    fixture).
+    """
+    n = EQUAL_LEVEL_LOOKBACK + 1
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "vol_atr_14": 1.0},
+        index=idx,
+    )
+    for i in (10, 20, 30):
+        _set_candle(df, i, high=100.5, close=100.0)
+    _set_candle(df, len(df) - 1, high=101.0, low=99.9, close=100.0)
+
+    r = estimate_liquidity_trap(df, min_sweep_touches=2)
+    assert r.sweep_direction == "bearish"
+    assert r.nearest_resistance_cluster is None  # it was just swept
+    assert r.trap_probability == 0.0
+
+
+def test_cluster_level_excludes_wicks_disqualified_from_the_touch_count():
+    """
+    `level` was the mean of ALL proximity members, including ones the
+    `respected` filter had just disqualified as non-touches, so the
+    reported level was pulled by wicks explicitly judged not to be part of
+    the cluster. That level also feeds distance_atr and the sweep-breach
+    comparison, so the error propagated.
+    """
+    values = np.array([100.0, 100.05, 100.10])
+    closes = np.array([99.0, 99.0, 100.5])  # third candle closed THROUGH the level
+    clusters = _cluster_levels(values, closes, "resistance", atr=1.0, tolerance_atr=0.25)
+
+    assert len(clusters) == 1
+    assert clusters[0].touch_count == 2
+    assert clusters[0].level == pytest.approx((100.0 + 100.05) / 2)  # not the 3-member mean
+
+
+def test_result_rejects_confirmed_sweep_with_no_direction():
+    """Both halves of the invariant are now enforced; previously only the
+    converse (direction without confirmation) raised."""
+    with pytest.raises(ValueError, match="sweep_direction"):
+        LiquidityTrapResult(
+            trap_probability=0.5, liquidity_attraction_score=0.5,
+            sweep_just_confirmed=True, sweep_direction=None,
+            nearest_resistance_cluster=None, nearest_support_cluster=None, reasons=[],
+        )
+
+
+def test_cluster_validates_its_own_invariants():
+    """LiquidityCluster was the only result dataclass across all four
+    macro_mtf_liquidity_vol modules with no validation at all."""
+    with pytest.raises(ValueError, match="side"):
+        LiquidityCluster(side="banana", level=100.0, touch_count=2, distance_atr=1.0)
+    with pytest.raises(ValueError, match="touch_count"):
+        LiquidityCluster(side="resistance", level=100.0, touch_count=1, distance_atr=1.0)
+    with pytest.raises(ValueError, match="distance_atr"):
+        LiquidityCluster(side="resistance", level=100.0, touch_count=2, distance_atr=-1.0)
+    with pytest.raises(ValueError, match="level"):
+        LiquidityCluster(side="resistance", level=float("nan"), touch_count=2, distance_atr=1.0)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lookback": 0},
+        {"lookback": 1},
+        {"level_tolerance_atr": 0.0},
+        {"proximity_scale_atr": 0.0},
+        {"density_saturation_touches": 0},
+    ],
+)
+def test_invalid_tunables_are_rejected_with_a_clear_error(kwargs):
+    """`lookback=0` previously produced an opaque IndexError; the two
+    scale parameters are divisors and raised ZeroDivisionError deep inside
+    the risk calculation."""
+    df = _flat_baseline(EQUAL_LEVEL_LOOKBACK + 5)
+    with pytest.raises(ValueError):
+        estimate_liquidity_trap(df, **kwargs)
+
+
+def test_non_finite_prices_are_rejected_rather_than_silently_finding_nothing():
+    """NaN prices degrade every comparison to False, reporting "no
+    structural risk" for what is really "no usable data"."""
+    df = _flat_baseline(EQUAL_LEVEL_LOOKBACK + 5)
+    df.iloc[-1, df.columns.get_loc("high")] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        estimate_liquidity_trap(df)
+
+    df2 = _flat_baseline(EQUAL_LEVEL_LOOKBACK + 5)
+    df2.iloc[-10, df2.columns.get_loc("low")] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        estimate_liquidity_trap(df2)
+
+
+# ------------------------------------------------------------------------ #
+# 2026-08-14: sweep selectivity re-tune
+# ------------------------------------------------------------------------ #
+
+
+def _sweep_fixture(*, touches: int, penetration: float, atr: float = 1.0) -> pd.DataFrame:
+    """Engineered resistance sweep with a controllable touch count and
+    penetration depth, on a flat canvas so nothing else clusters."""
+    n = EQUAL_LEVEL_LOOKBACK + 1
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "vol_atr_14": atr},
+        index=idx,
+    )
+    level = 105.0
+    for k in range(touches):
+        _set_candle(df, 5 + k * 5, high=level, close=100.0)
+    _set_candle(df, n - 1, high=level + penetration, low=99.0, close=101.0)
+    return df
+
+
+def test_shallow_penetration_is_not_a_sweep():
+    """A wick clearing a level by less than the level's own tolerance band is
+    indistinguishable from touching it. Breach-and-close-back alone fired on
+    44.1% of real BTC 1h bars -- near coin-flip for a supposedly specific,
+    programmatically detectable event."""
+    shallow = estimate_liquidity_trap(
+        _sweep_fixture(touches=5, penetration=0.01), min_sweep_touches=2
+    )
+    assert shallow.sweep_just_confirmed is False
+
+    deep = estimate_liquidity_trap(
+        _sweep_fixture(touches=5, penetration=0.5), min_sweep_touches=2
+    )
+    assert deep.sweep_just_confirmed is True
+    assert deep.sweep_direction == "bearish"
+
+
+def test_penetration_threshold_is_measured_in_atr_not_price():
+    """Scale-invariance: the same price penetration must fail at a larger
+    ATR, since the tolerance band scales with ATR."""
+    small_atr = estimate_liquidity_trap(
+        _sweep_fixture(touches=5, penetration=0.5, atr=1.0), min_sweep_touches=2
+    )
+    large_atr = estimate_liquidity_trap(
+        _sweep_fixture(touches=5, penetration=0.5, atr=10.0), min_sweep_touches=2
+    )
+    assert small_atr.sweep_just_confirmed is True
+    assert large_atr.sweep_just_confirmed is False
+
+
+def test_thinly_tested_pool_is_not_a_sweep_at_the_default():
+    """A cluster is 'two or more wicks' per spec, but a SWEEP worth acting on
+    requires a better-tested pool -- real BTC 1h carries a median of 7
+    simultaneous resistance clusters, so any upward wick sweeps something."""
+    thin = estimate_liquidity_trap(_sweep_fixture(touches=2, penetration=0.5))
+    assert thin.sweep_just_confirmed is False
+
+    thick = estimate_liquidity_trap(_sweep_fixture(touches=5, penetration=0.5))
+    assert thick.sweep_just_confirmed is True
+
+
+def test_cluster_minimum_of_two_is_still_reachable_explicitly():
+    """The spec's own cluster definition must remain usable -- the stricter
+    sweep bar is a separate, opt-out-able tuning decision."""
+    r = estimate_liquidity_trap(
+        _sweep_fixture(touches=2, penetration=0.5), min_sweep_touches=2
+    )
+    assert r.sweep_just_confirmed is True
+
+
+def test_selectivity_defaults_are_the_documented_values():
+    assert DEFAULT_MIN_PENETRATION_ATR == DEFAULT_LEVEL_TOLERANCE_ATR == 0.25
+    assert DEFAULT_MIN_SWEEP_TOUCHES == 4
+
+
+def test_min_sweep_touches_below_the_cluster_minimum_is_rejected():
+    """Below 2 it cannot select anything additional -- a cluster already
+    requires two or more wicks."""
+    with pytest.raises(ValueError, match="min_sweep_touches"):
+        estimate_liquidity_trap(_sweep_fixture(touches=5, penetration=0.5), min_sweep_touches=1)
+
+
+def test_negative_penetration_is_rejected():
+    with pytest.raises(ValueError, match="min_penetration_atr"):
+        estimate_liquidity_trap(
+            _sweep_fixture(touches=5, penetration=0.5), min_penetration_atr=-0.1
+        )

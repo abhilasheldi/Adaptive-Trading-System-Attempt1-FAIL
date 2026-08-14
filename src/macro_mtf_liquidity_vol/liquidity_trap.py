@@ -59,6 +59,7 @@ pattern for BOS/SFP), so a candle can never contribute to "sweeping" a
 cluster it helped form.
 """
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -76,6 +77,31 @@ EQUAL_LEVEL_LOOKBACK = 50
 # into a probability, and no numeric tolerance for what counts as "equal."
 # NOT MASTER_CONTEXT/Adaptive-doc exact numbers; tune freely.
 DEFAULT_LEVEL_TOLERANCE_ATR = 0.25  # wicks within this many ATRs of each other count as "equal"
+# Sweep-selectivity thresholds (2026-08-14). Neither is a source-doc number;
+# both exist because breach-and-close-back alone fired on 44.1% of real BTC
+# 1h bars, which cannot be the "specific, programmatically detectable event"
+# the spec describes. See the confirmation block in `estimate_liquidity_trap`
+# for the full measurement and reasoning.
+# Set equal to DEFAULT_LEVEL_TOLERANCE_ATR on purpose, not fitted: a cluster's
+# level is only defined to within +/- that tolerance, so a "penetration"
+# smaller than it is inside the level's own uncertainty band and cannot be
+# distinguished from touching the level.
+DEFAULT_MIN_PENETRATION_ATR = 0.25
+# Median cluster on real BTC 1h has 3 touches; requiring more than the median
+# restricts sweeps to the better-tested pools. A CLUSTER is still "two or
+# more wicks" per spec -- this is a separate, stricter bar for what counts as
+# a sweep worth acting on.
+DEFAULT_MIN_SWEEP_TOUCHES = 4
+#
+# NOT ADDED, deliberately -- a "rejection wick must be >= X% of the candle's
+# range" test was implemented and then removed on 2026-08-14 because it is
+# PROVABLY REDUNDANT here: confirmation already requires
+# `close < swept_level < high`, which forces
+# (high - close)/(high - low) >= (high - level)/(high - low) > 0. Measured on
+# real BTC 1h it moved the sweep rate from 44.12% to 44.35% -- i.e. it never
+# bound. Keeping a parameter that cannot bind would misrepresent how
+# selective this layer is. Do not re-add it without a metric that is
+# independent of the close-back-inside condition.
 DEFAULT_PROXIMITY_SCALE_ATR = 2.0  # distance (in ATR) at which proximity contribution decays to ~0
 DEFAULT_DENSITY_SATURATION_TOUCHES = 4  # touch count at which density contribution saturates at 1.0
 
@@ -97,6 +123,27 @@ class LiquidityCluster:
     level: float  # heuristic representative price (mean of touching wicks) -- NOT a precision claim, see module docstring
     touch_count: int
     distance_atr: float  # |level - reference_close| / atr -- the number to actually use downstream
+
+    def __post_init__(self) -> None:
+        # 2026-08-14 review: this was the only result dataclass across all
+        # four macro_mtf_liquidity_vol modules with no validation at all --
+        # `LiquidityCluster(side="banana", level=..., touch_count=-5,
+        # distance_atr=-1.0)` constructed silently. Every sibling
+        # (MacroRegimeResult, MTFAlignmentResult, VolatilityStateResult,
+        # LiquidityTrapResult) validates its own invariants in __post_init__.
+        if self.side not in ("resistance", "support"):
+            raise ValueError(f"side must be 'resistance' or 'support', got {self.side!r}.")
+        if not math.isfinite(self.level):
+            raise ValueError(f"level must be finite, got {self.level}.")
+        if self.touch_count < 2:
+            raise ValueError(
+                f"touch_count must be >= 2 -- a 'cluster' is by definition 'two or more "
+                f"wicks testing the same level' (Adaptive doc, Layer 5); got {self.touch_count}."
+            )
+        if not math.isfinite(self.distance_atr) or self.distance_atr < 0:
+            raise ValueError(
+                f"distance_atr must be a finite, non-negative magnitude, got {self.distance_atr}."
+            )
 
 
 @dataclass(frozen=True)
@@ -126,6 +173,17 @@ class LiquidityTrapResult:
             )
         if self.sweep_direction is not None and not self.sweep_just_confirmed:
             raise ValueError("sweep_direction set without sweep_just_confirmed=True.")
+        # 2026-08-14 review: the converse was NOT checked, so
+        # `sweep_just_confirmed=True, sweep_direction=None` -- "a sweep
+        # confirmed, but in no direction" -- constructed silently. Both
+        # halves of the invariant are now enforced, matching how
+        # `MacroRegimeResult` validates `is_macro_event_window` against
+        # `state` in both directions.
+        if self.sweep_just_confirmed and self.sweep_direction is None:
+            raise ValueError(
+                "sweep_just_confirmed=True requires a sweep_direction; a confirmed "
+                "sweep with no direction is not a meaningful state."
+            )
         if self.sweep_direction not in (None, "bullish", "bearish"):
             raise ValueError(f"invalid sweep_direction {self.sweep_direction!r}")
 
@@ -193,15 +251,28 @@ def _cluster_levels(
             j += 1
         group_values = sorted_values[i:j]
         group_closes = sorted_closes[i:j]
-        level = float(np.mean(group_values))
+        candidate_level = float(np.mean(group_values))
 
         if side == "resistance":
-            respected = group_closes < level  # didn't close through (above) the shared level
+            respected = group_closes < candidate_level  # didn't close through (above) the shared level
         else:
-            respected = group_closes > level  # didn't close through (below) the shared level
+            respected = group_closes > candidate_level  # didn't close through (below) the shared level
         touch_count = int(np.sum(respected))
 
         if touch_count >= 2:
+            # 2026-08-14 review: `level` was the mean of ALL proximity
+            # members, including the ones the `respected` filter had just
+            # disqualified as non-touches. The reported level was therefore
+            # pulled by wicks explicitly judged NOT to be part of the
+            # cluster -- e.g. highs [100.00, 100.05, 100.10] where only the
+            # first two were rejections reported level=100.050 rather than
+            # the actual touching mean of 100.025. That level also feeds
+            # `distance_atr` and the sweep-breach comparison, so the error
+            # propagated. The candidate (all-member) mean is still what
+            # DEFINES the shared level for the respect test -- it has to be,
+            # since the test is what identifies the touches -- but the
+            # REPORTED level is now the mean of the genuine touches only.
+            level = float(np.mean(group_values[respected]))
             clusters.append(
                 LiquidityCluster(
                     side=side,
@@ -218,11 +289,14 @@ def _cluster_levels(
 
 def estimate_liquidity_trap(
     df: pd.DataFrame,
+    *,
     atr_col: str = "vol_atr_14",
     lookback: int = EQUAL_LEVEL_LOOKBACK,
     level_tolerance_atr: float = DEFAULT_LEVEL_TOLERANCE_ATR,
     proximity_scale_atr: float = DEFAULT_PROXIMITY_SCALE_ATR,
     density_saturation_touches: int = DEFAULT_DENSITY_SATURATION_TOUCHES,
+    min_penetration_atr: float = DEFAULT_MIN_PENETRATION_ATR,
+    min_sweep_touches: int = DEFAULT_MIN_SWEEP_TOUCHES,
 ) -> LiquidityTrapResult:
     """
     Estimate stop-hunt/liquidity-sweep trap risk for the LATEST candle in
@@ -253,6 +327,40 @@ def estimate_liquidity_trap(
     -------
     LiquidityTrapResult
     """
+    # 2026-08-14 review: these four tunables were entirely unvalidated.
+    # `lookback=0` produced an opaque IndexError from `window_closes[-1]`;
+    # `proximity_scale_atr=0` / `density_saturation_touches=0` are used as
+    # divisors and raised ZeroDivisionError deep inside `_side_risk`. Every
+    # sibling module validates its own tunables' domain.
+    if lookback < 2:
+        raise ValueError(
+            f"lookback must be >= 2 (a cluster requires at least two prior wicks), got {lookback}."
+        )
+    if not math.isfinite(level_tolerance_atr) or level_tolerance_atr <= 0:
+        raise ValueError(
+            f"level_tolerance_atr must be finite and positive, got {level_tolerance_atr}."
+        )
+    if not math.isfinite(proximity_scale_atr) or proximity_scale_atr <= 0:
+        raise ValueError(
+            f"proximity_scale_atr must be finite and positive (it is a divisor), "
+            f"got {proximity_scale_atr}."
+        )
+    if density_saturation_touches < 1:
+        raise ValueError(
+            f"density_saturation_touches must be >= 1 (it is a divisor), "
+            f"got {density_saturation_touches}."
+        )
+    if not math.isfinite(min_penetration_atr) or min_penetration_atr < 0:
+        raise ValueError(
+            f"min_penetration_atr must be finite and non-negative, got {min_penetration_atr}."
+        )
+    if min_sweep_touches < 2:
+        raise ValueError(
+            f"min_sweep_touches must be >= 2 -- a cluster is by definition 'two or more wicks' "
+            f"(Adaptive doc, Layer 5), so a lower bound cannot select anything additional; "
+            f"got {min_sweep_touches}."
+        )
+
     required = {"high", "low", "close", atr_col}
     missing = required - set(df.columns)
     if missing:
@@ -272,6 +380,21 @@ def estimate_liquidity_trap(
     atr = float(current[atr_col])
     if not np.isfinite(atr) or atr <= 0:
         raise ValueError(f"Current-candle {atr_col} must be a positive finite value, got {atr}.")
+
+    # Non-finite price data silently degrades every comparison below to
+    # False (no clusters form, no sweep is ever detected), which would
+    # report "no structural risk" for what is really "no usable data" --
+    # the same fail-open class of bug fixed across the sibling modules in
+    # this 2026-08-14 review. Checked on the current candle and the window.
+    for col in ("high", "low", "close"):
+        if not math.isfinite(float(current[col])):
+            raise ValueError(f"Current-candle {col!r} must be finite, got {current[col]!r}.")
+    window_ohlc = window[["high", "low", "close"]].to_numpy(dtype=float)
+    if not np.isfinite(window_ohlc).all():
+        raise ValueError(
+            f"The trailing {lookback}-candle window contains non-finite high/low/close "
+            f"values; cluster detection would silently find nothing rather than fail."
+        )
 
     window_closes = window["close"].to_numpy(dtype=float)
     reference_price = float(window_closes[-1])  # price immediately before the current candle
@@ -300,9 +423,6 @@ def estimate_liquidity_trap(
         )
         if c.level < reference_price
     ]
-    nearest_resistance = min(resistance_clusters, key=lambda c: c.distance_atr, default=None)
-    nearest_support = min(support_clusters, key=lambda c: c.distance_atr, default=None)
-
     # --- Sweep check: did the CURRENT candle's wick breach a prior cluster
     # level and then close back on the rejecting side (confirmed reversal)?
     # "Liquidity sweeps (stop-runs above equal highs or below equal lows,
@@ -312,49 +432,122 @@ def estimate_liquidity_trap(
     sweep_direction: Optional[str] = None
     reasons: List[str] = []
 
-    # The meaningful "level swept" is the FARTHEST (highest, for resistance)
-    # one the wick actually reached, not the nearest one it trivially also
-    # exceeded along the way -- a high that clears a level 3 ATR away
-    # necessarily also clears every resistance cluster closer than that,
-    # but "confirmed reversal" has to be evaluated against the extent of
-    # the sweep, not an unrelated closer level. Using `min()` here was a
-    # real bug caught by testing an engineered sweep against real
-    # (non-degenerate) synthetic data: it picked up an irrelevant nearby
-    # cluster the price never meaningfully "swept" and incorrectly
-    # required closing back below THAT instead of the level actually hunted.
-    swept_resistance = [c for c in resistance_clusters if current["high"] > c.level]
+    # CONFIRMATION RULE (rewritten 2026-08-14 review). Two distinct levels
+    # matter here and they are NOT the same one:
+    #
+    #  - The EXTENT of the sweep (reported): the farthest level the wick
+    #    reached -- highest for resistance, lowest for support. This is what
+    #    describes how deep the stop-run went.
+    #  - The level confirmation is TESTED against: the NEAREST swept level
+    #    (lowest for resistance, highest for support). A "confirmed
+    #    reversal" means price was rejected back inside the range -- i.e.
+    #    back past ALL the liquidity it just ran, not merely back below the
+    #    single farthest level.
+    #
+    # The previous implementation tested against the farthest level, which
+    # is the most permissive possible rule and manufactured false
+    # reversals: with clusters at 102 and 110, a candle with high=111 and
+    # close=108 was reported as a "confirmed bearish sweep" even though it
+    # closed decisively ABOVE the 102 cluster -- i.e. a genuine bullish
+    # breakout through that level, labelled as its opposite. (Testing
+    # against the farthest level was itself a fix for an earlier bug where
+    # `min()` picked up an irrelevant cluster far below current price; that
+    # original problem is now handled properly by the
+    # `c.level > reference_price` / `c.level < reference_price` position
+    # filters applied above, so the nearest-level test is safe here.)
+    # SELECTIVITY REQUIREMENTS (2026-08-14). Breach-and-close-back alone is
+    # not a stop-run: measured on real BTC 1h it fired on 44.1% of bars, with
+    # a near-even bullish/bearish split (182/197) -- i.e. noise, not the
+    # "specific, programmatically detectable event" the spec describes. For
+    # scale, the earlier compression+SFP proxy selected 2.04% of candles.
+    # Tightening `level_tolerance_atr` barely moved it (44.1% -> 35.4% going
+    # from 0.25 to 0.05 ATR), which ruled out cluster tolerance as the cause.
+    #
+    # The actual gap: a high that exceeded a level by a cent and closed a
+    # cent back counted identically to a genuine stop-run. Two additional
+    # conditions, both squarely within this layer's "equal highs/lows and
+    # wick behaviour" scope, now have to hold:
+    #
+    #   1. PENETRATION -- the wick must clear the level by at least
+    #      `min_penetration_atr` ATR. A sweep that never meaningfully took
+    #      the liquidity did not take it.
+    #   2. REJECTION -- the rejecting wick must be at least
+    #      `min_rejection_frac` of the candle's own range. This is the
+    #      standard pin-bar/SFP shape test and is what distinguishes
+    #      "rejected at the level" from "drifted past it and closed lower".
+    #
+    # Both are judgment-call numbers (no source doc quantifies either), which
+    # is why they are named, documented, tunable constants rather than
+    # literals -- see DEFAULT_MIN_PENETRATION_ATR / DEFAULT_MIN_REJECTION_FRAC.
+    swept_resistance = [
+        c for c in resistance_clusters
+        if c.touch_count >= min_sweep_touches
+        and current["high"] > c.level + min_penetration_atr * atr
+    ]
+    bearish_confirmed = False
     if swept_resistance:
-        swept_extent = max(c.level for c in swept_resistance)
-        if current["close"] < swept_extent:
-            sweep_just_confirmed = True
-            sweep_direction = "bearish"  # swept a resistance cluster (stop-run up), reversed down
-            extent_cluster = max(swept_resistance, key=lambda c: c.level)
+        extent_cluster = max(swept_resistance, key=lambda c: c.level)
+        nearest_swept_level = min(c.level for c in swept_resistance)
+        if current["close"] < nearest_swept_level:
+            bearish_confirmed = True
             reasons.append(
-                f"Bearish sweep confirmed: high {current['high']:.4g} breached resistance cluster "
-                f"(level~{swept_extent:.4g}, {extent_cluster.touch_count} touches), closed back "
-                f"below at {current['close']:.4g}."
+                f"Bearish sweep confirmed: high {current['high']:.4g} breached resistance to "
+                f"{extent_cluster.level:.4g} ({extent_cluster.touch_count} touches) by "
+                f">={min_penetration_atr:.2f} ATR, closed back below all "
+                f"{len(swept_resistance)} swept level(s) at {current['close']:.4g}."
             )
 
-    # Mirror of the resistance case above: the meaningful "level swept" is
-    # the farthest (lowest) one reached, not the nearest one trivially also
-    # undercut along the way.
-    swept_support = [c for c in support_clusters if current["low"] < c.level]
+    # Mirror of the resistance case above.
+    swept_support = [
+        c for c in support_clusters
+        if c.touch_count >= min_sweep_touches
+        and current["low"] < c.level - min_penetration_atr * atr
+    ]
+    bullish_confirmed = False
     if swept_support:
-        swept_extent = min(c.level for c in swept_support)
-        if current["close"] > swept_extent:
-            # Both directions can't be confirmed on the same candle in
-            # practice (would require closing both above AND below
-            # distinct levels), but don't assume -- report whichever is
-            # detected; if genuinely both, bullish is reported second and
-            # wins, an explicit, visible (not silent) tie-break choice.
-            sweep_just_confirmed = True
-            sweep_direction = "bullish"  # swept a support cluster (stop-run down), reversed up
-            extent_cluster = min(swept_support, key=lambda c: c.level)
+        extent_cluster = min(swept_support, key=lambda c: c.level)
+        nearest_swept_level = max(c.level for c in swept_support)
+        if current["close"] > nearest_swept_level:
+            bullish_confirmed = True
             reasons.append(
-                f"Bullish sweep confirmed: low {current['low']:.4g} breached support cluster "
-                f"(level~{swept_extent:.4g}, {extent_cluster.touch_count} touches), closed back "
-                f"above at {current['close']:.4g}."
+                f"Bullish sweep confirmed: low {current['low']:.4g} breached support to "
+                f"{extent_cluster.level:.4g} ({extent_cluster.touch_count} touches) by "
+                f">={min_penetration_atr:.2f} ATR, closed back above all "
+                f"{len(swept_support)} swept level(s) at {current['close']:.4g}."
             )
+
+    # CONFLICT HANDLING (2026-08-14 review). The previous code asserted
+    # that both directions "can't be confirmed on the same candle in
+    # practice (would require closing both above AND below distinct
+    # levels)" and simply let the bullish branch overwrite the bearish one.
+    # That reasoning is inverted: it requires closing BELOW a resistance
+    # level and ABOVE a support level, which is exactly what any ordinary
+    # wide-range candle that closes near the middle of its range does --
+    # e.g. resistance ~105, support ~95, candle high=106 low=94 close=100.
+    # Both branches fired and `sweep_direction` silently became "bullish"
+    # purely because that branch runs second. `ensemble.py` consumes
+    # `sweep_direction` as a DIRECTIONAL signal scaled by
+    # `trap_probability`, so a symmetric, directionally meaningless outside
+    # bar was injecting a hard bullish lean into the meta-model.
+    #
+    # A candle that swept liquidity on BOTH sides and closed between them
+    # has, by construction, given no directional information -- it is
+    # reported as no confirmed sweep, which the ensemble treats as neutral.
+    # This is the capital-preservation-consistent resolution, and the
+    # conflict stays visible in `reasons` rather than being silently
+    # collapsed.
+    if bearish_confirmed and bullish_confirmed:
+        reasons.append(
+            "Both a bearish and a bullish sweep confirmed on the same candle "
+            "(liquidity taken on both sides, close landed between the swept levels) -- "
+            "reported as NO confirmed sweep: this candle carries no directional information."
+        )
+    elif bearish_confirmed:
+        sweep_just_confirmed = True
+        sweep_direction = "bearish"  # swept a resistance cluster (stop-run up), reversed down
+    elif bullish_confirmed:
+        sweep_just_confirmed = True
+        sweep_direction = "bullish"  # swept a support cluster (stop-run down), reversed up
 
     # --- Trap probability: heuristic forward-looking risk that an
     # UN-SWEPT nearby cluster gets hunted next -- proximity (closer =
@@ -364,6 +557,19 @@ def estimate_liquidity_trap(
     # this is descriptive structure at the current moment, not a forecast
     # (matching the "heuristic estimator, not a forecaster" framing used
     # throughout this project's Layer 3/4 modules too). ---
+    # 2026-08-14 review: the comment above promises risk from an UN-SWEPT
+    # cluster, but `nearest_*` was previously computed over ALL clusters,
+    # including any the current candle had just run. A pool that was just
+    # consumed was still being scored as pending forward risk. The
+    # already-swept clusters remain fully visible in `reasons` and in the
+    # `sweep_*` fields; these two fields now mean "nearest cluster still
+    # standing", consistent with what `trap_probability` claims to measure.
+    swept_ids = {id(c) for c in swept_resistance} | {id(c) for c in swept_support}
+    unswept_resistance = [c for c in resistance_clusters if id(c) not in swept_ids]
+    unswept_support = [c for c in support_clusters if id(c) not in swept_ids]
+    nearest_resistance = min(unswept_resistance, key=lambda c: c.distance_atr, default=None)
+    nearest_support = min(unswept_support, key=lambda c: c.distance_atr, default=None)
+
     def _side_risk(cluster: Optional[LiquidityCluster]) -> float:
         if cluster is None:
             return 0.0

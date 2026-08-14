@@ -268,27 +268,63 @@ class EnsembleSignalSet:
 
     component_a: AnalogForecast
     component_b: ComponentBSignal
-    macro_regime: MacroRegimeResult
-    mtf_alignment: MTFAlignmentResult
-    liquidity_trap: LiquidityTrapResult
+    # Optional (2026-08-14): a signal whose LAYER is not available in the
+    # current system configuration is passed as None and excluded from the
+    # blend, with the remaining signals' weights renormalized for that row --
+    # exactly the treatment `component_a` already receives when its N>=50
+    # gate withholds a forecast (see `blend_signals_detailed`).
+    #
+    # This exists because Layer 3 (macro regime) needs macro data this
+    # project does not yet ingest, and Layer 4 (MTF alignment) needs 1D/1W
+    # timeframes that do not exist in `config.yaml`'s `["1h", "4h"]`. The
+    # alternative -- feeding a constant, fabricated "neutral" MacroRegimeResult
+    # -- would be strictly worse: a neutral distribution is not an absence of
+    # evidence, it actively pulls the blend toward neutral in proportion to
+    # its weight, so an unavailable layer would silently damp every
+    # prediction rather than stepping out of the way.
+    #
+    # None means "this layer is not wired up at all", which is different from
+    # a layer that IS wired up and happens to read neutral this row -- that
+    # case still passes a real result object.
+    macro_regime: Optional[MacroRegimeResult]
+    mtf_alignment: Optional[MTFAlignmentResult]
+    liquidity_trap: Optional[LiquidityTrapResult]
 
     def __post_init__(self) -> None:
-        expected_types = {
+        # component_a/component_b are ALWAYS required: they are the
+        # predictive core itself, not optional conditioning layers, and an
+        # ensemble with neither has nothing to blend.
+        required_types = {
             "component_a": AnalogForecast,
             "component_b": ComponentBSignal,
+        }
+        optional_types = {
             "macro_regime": MacroRegimeResult,
             "mtf_alignment": MTFAlignmentResult,
             "liquidity_trap": LiquidityTrapResult,
         }
-        for field_name, expected_type in expected_types.items():
+        for field_name, expected_type in required_types.items():
             value = getattr(self, field_name)
             if not isinstance(value, expected_type):
                 raise TypeError(
                     f"EnsembleSignalSet.{field_name} must be a {expected_type.__name__} "
                     f"instance, got {type(value).__name__}. This guard exists specifically "
                     f"to keep raw Layer 2 features (or any other ad hoc value) from sneaking "
-                    f"into the ensemble alongside the five approved, already-independent "
+                    f"into the ensemble alongside the approved, already-independent "
                     f"signals -- see module docstring."
+                )
+        for field_name, expected_type in optional_types.items():
+            value = getattr(self, field_name)
+            # None is the ONLY permitted non-instance value, and it means
+            # "layer not wired up" -- everything else still raises, so the
+            # raw-Layer-2-feature guard is fully intact for these fields too.
+            if value is not None and not isinstance(value, expected_type):
+                raise TypeError(
+                    f"EnsembleSignalSet.{field_name} must be a {expected_type.__name__} "
+                    f"instance or None (meaning that layer is not available in this "
+                    f"configuration), got {type(value).__name__}. This guard exists "
+                    f"specifically to keep raw Layer 2 features (or any other ad hoc "
+                    f"value) from sneaking into the ensemble -- see module docstring."
                 )
 
 
@@ -341,7 +377,11 @@ def _component_b_distribution(signal: ComponentBSignal) -> np.ndarray:
     return np.array([signal.p_down, signal.p_neutral, signal.p_up])
 
 
-def _macro_regime_distribution(result: MacroRegimeResult) -> np.ndarray:
+def _macro_regime_distribution(result: Optional[MacroRegimeResult]) -> Optional[np.ndarray]:
+    # None => Layer 3 is not wired up in this configuration; excluded from
+    # the blend and its weight renormalized away (see EnsembleSignalSet).
+    if result is None:
+        return None
     if result.state == "Risk-On":
         direction, state_confidence = "bullish", result.confidence
     elif result.state == "Risk-Off":
@@ -356,7 +396,9 @@ def _macro_regime_distribution(result: MacroRegimeResult) -> np.ndarray:
     return _lean_distribution(direction, effective_confidence)
 
 
-def _mtf_alignment_distribution(result: MTFAlignmentResult) -> np.ndarray:
+def _mtf_alignment_distribution(result: Optional[MTFAlignmentResult]) -> Optional[np.ndarray]:
+    if result is None:
+        return None
     if result.dominant_direction == "bullish":
         return _lean_distribution("bullish", result.confidence)
     if result.dominant_direction == "bearish":
@@ -364,7 +406,9 @@ def _mtf_alignment_distribution(result: MTFAlignmentResult) -> np.ndarray:
     return _lean_distribution(None, 0.0)  # "mixed" or "neutral"
 
 
-def _liquidity_trap_distribution(result: LiquidityTrapResult) -> np.ndarray:
+def _liquidity_trap_distribution(result: Optional[LiquidityTrapResult]) -> Optional[np.ndarray]:
+    if result is None:
+        return None
     if not result.sweep_just_confirmed:
         return _lean_distribution(None, 0.0)
     return _lean_distribution(result.sweep_direction, result.trap_probability)
@@ -437,8 +481,11 @@ def blend_signals_detailed(
         raise TypeError(f"signals must be an EnsembleSignalSet, got {type(signals).__name__}.")
     distributions = _row_distributions(signals, min_independent_instances, analog_confidence_ramp_multiple)
     present = {name: dist for name, dist in distributions.items() if dist is not None}
-    # Unreachable in practice: only component_a can be None, and the other
-    # four always produce a (possibly fully-neutral) distribution.
+    # component_a can be None (N>=50 gate withheld a forecast), and any of
+    # macro_regime/mtf_alignment/liquidity_trap can be None (that layer is
+    # not wired up in this configuration). component_b is always present,
+    # so this stays unreachable in practice -- but it is a real guard now,
+    # not a theoretical one.
     if not present:
         raise RuntimeError("blend_signals_detailed: no signals available to blend.")
 
@@ -505,6 +552,12 @@ class WeightFitResult:
     weights: Dict[str, float]
     val_logloss: float
     n_validation_rows: int
+    # False when the optimizer could not converge and equal weights were
+    # substituted -- reachable on a degenerate fold where the objective is
+    # flat because only one signal is present. Recorded rather than applied
+    # silently; see `fit_ensemble_weights`.
+    converged: bool = True
+    optimizer_message: Optional[str] = None
 
 
 def _mean_log_loss_for_weights(
@@ -574,7 +627,36 @@ def fit_ensemble_weights(
         constraints=constraints,
     )
     if not result.success:
-        raise RuntimeError(f"Ensemble weight optimization failed to converge: {result.message}")
+        # 2026-08-14: previously raised, which killed an entire walk-forward
+        # run on a DEGENERATE-BUT-VALID fold. The reachable case: when only
+        # one signal is actually present across the validation rows (e.g.
+        # Component A withheld by its N>=50 gate on most rows, and the
+        # conditioning layers not wired up or still in warm-up), the blend
+        # equals that one signal regardless of the weight vector, so the
+        # objective is genuinely FLAT in the other dimensions and SLSQP
+        # reports "Inequality constraints incompatible".
+        #
+        # When the objective is flat, every weight vector is equally
+        # optimal and equal weighting is the correct, principled choice --
+        # the same conservative default the Adaptive doc prescribes for the
+        # instability fallback. It is recorded on the result
+        # (`converged=False`) rather than applied silently, so a caller can
+        # tell "the optimizer chose these weights" from "no information was
+        # available to choose with".
+        equal = equal_weights()
+        return WeightFitResult(
+            weights=equal,
+            val_logloss=float(
+                _mean_log_loss_for_weights(
+                    np.array([equal[name] for name in SIGNAL_NAMES]),
+                    validation_signals, y_idx,
+                    min_independent_instances, analog_confidence_ramp_multiple,
+                )
+            ),
+            n_validation_rows=len(validation_signals),
+            converged=False,
+            optimizer_message=str(result.message),
+        )
 
     w = np.clip(result.x, 0.0, None)
     w_sum = w.sum()
@@ -836,7 +918,13 @@ class EnsembleMetaModel:
             analog_n_independent=signals.component_a.n_independent,
             analog_distance_threshold=signals.component_a.distance_threshold,
             analog_is_valid=signals.component_a.is_valid,
-            macro_weight_applied=signals.macro_regime.macro_weight,
+            # 0.0 when Layer 3 is not wired up in this configuration: no
+            # macro conditioning was applied, which is exactly what this
+            # field reports. Reading `.macro_weight` unconditionally raised
+            # AttributeError on the absent-layer path.
+            macro_weight_applied=(
+                0.0 if signals.macro_regime is None else signals.macro_regime.macro_weight
+            ),
             weights_used=dict(self._active_weights),
             used_fallback_equal_weighting=self._is_using_fallback,
         )

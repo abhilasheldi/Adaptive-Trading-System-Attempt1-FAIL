@@ -1,5 +1,5 @@
 """
-Explainability Engine (Layer 8).
+Explainability Engine (Layer 8) -- PURE TEMPLATE / RULE-BASED.
 
 Per the Adaptive doc's Layer 8 section: "generates human-readable
 explanations mapping feature attribution weights to individual prediction
@@ -9,29 +9,64 @@ a trade fails, the explanation identifies which inputs were misleading."
 Prereq (Prompt Playbook 2F): the Ensemble Meta-Model (Layer 7C,
 `predictive_core.ensemble`), already built.
 
-This module is a RENDERER, not a computer of new numbers: every quantity
-in its output (direction probability, EV, position size, weight
-stability) is either read directly from an already-computed upstream
-object (`ensemble.EnsembleForecast`, `ensemble.WeightStabilityReport`) or
-derived by an exact, documented, provable formula from one (the per-signal
-contribution breakdown, the 95% CI) -- see `contributions_from_ensemble`
-and `direction_probability_ci` for exactly which. It never re-derives
-Component A/B, macro regime, MTF alignment, or liquidity trap logic itself
--- that would risk drifting out of sync with `ensemble.py`'s own
-arithmetic, exactly the failure mode this project's cross-module reviews
-have repeatedly caught elsewhere.
+=========================================================================
+NO LLM, NO NETWORK, NO API KEY -- A HARD ARCHITECTURAL CONSTRAINT
+=========================================================================
+This module contains no LLM call of any kind, in any tier, on any path --
+not in normal operation, not in a fallback, not behind a feature flag. It
+performs no network I/O, requires no API key, and creates no billing
+dependency. Its only imports are the standard library (`math`,
+`dataclasses`, `typing`), `numpy`, and this project's own
+`predictive_core.ensemble` -- none of which makes an external call.
 
-Two inputs this module explicitly does NOT compute, and accepts as
+An earlier version of this file called the Anthropic API to phrase each
+contribution line, with a template path as a fallback. That entire path
+(`AnthropicProseGenerator`, the prompt builder, the JSON response parser,
+`ProseGenerationError`, the `enable_live_api` flag, and the `used_live_api`
+output field) has been REMOVED, not merely disabled. The reasons this is
+better here, not just cheaper:
+
+  - DETERMINISM. A trading system's audit log must be reproducible: the
+    same attribution input must render byte-for-byte identically forever,
+    so that a post-mortem on a losing trade reads exactly what was shown
+    at decision time. A sampled language model cannot guarantee that; a
+    template can, and this module's test suite asserts it directly.
+  - NO NUMERIC RISK SURFACE. The old design kept numbers away from the
+    model as a defence-in-depth boundary. Removing the model removes the
+    boundary's reason to exist -- there is now no path, however guarded,
+    by which generated text can sit beside a number it did not come from.
+  - NO RUNTIME DEPENDENCY. Explanation generation cannot fail, time out,
+    rate-limit, or cost money at the moment a trade is being evaluated.
+
+Prose is produced by mapping structured attribution facts onto
+pre-written sentence structures (see `_PHRASE_BUILDERS` and
+`_build_narrative`). Numbers are ALWAYS inserted directly from the
+attribution data via format specifiers -- never generated, paraphrased,
+rounded by a model, or re-derived.
+
+=========================================================================
+This module is a RENDERER, not a computer of new numbers
+=========================================================================
+Every quantity in its output (direction probability, EV, position size,
+weight stability) is either read directly from an already-computed
+upstream object (`ensemble.EnsembleForecast`,
+`ensemble.WeightStabilityReport`) or derived by an exact, documented,
+provable formula from one (the per-signal contribution breakdown, the 95%
+CI) -- see `contributions_from_ensemble` and `direction_probability_ci`.
+It never re-derives Component A/B, macro regime, MTF alignment, or
+liquidity trap logic itself -- that would risk drifting out of sync with
+`ensemble.py`'s own arithmetic, exactly the failure mode this project's
+cross-module reviews have repeatedly caught elsewhere.
+
+Three inputs this module explicitly does NOT compute, and accepts as
 already-computed (`TradeRiskSummary`): EV estimate, EV lower CI bound, and
 position size. These are Layer 9 (Risk Engine) and Layer 10 (Position
 Sizing / quarter-Kelly) outputs per the Adaptive doc's own layer
-boundaries -- neither layer exists in this codebase yet (Prompt Playbook
-2G, not yet built). Rather than fabricate a placeholder Risk/Sizing
-computation inside an Explainability module (whose job is to RENDER
-decisions, not make them), the caller supplies these three numbers
-directly, exactly as `mtf_alignment.py` accepts already-derived
-per-timeframe directional reads instead of computing them from a raw
-Layer 2 feature vector itself.
+boundaries. Rather than fabricate a placeholder Risk/Sizing computation
+inside an Explainability module (whose job is to RENDER decisions, not
+make them), the caller supplies these three numbers directly, exactly as
+`mtf_alignment.py` accepts already-derived per-timeframe directional reads
+instead of computing them from a raw Layer 2 feature vector itself.
 
 Signal-contribution breakdown -- provable, not invented. Per signal i
 (one of the ensemble's five inputs), define its contribution to the
@@ -46,16 +81,21 @@ module reuses directly rather than re-deriving), `p_i` is signal i's own
 and `opposite` is the class most directly opposing it (down for up, up
 for down; for a "neutral" call, the stronger of {down, up} stands in for
 "opposite", since neutral has no single natural opposite). This is exact
-and provable: summing `impact_pct_i` over all five signals equals exactly
+and provable: summing `impact_pct_i` over ALL five signals equals exactly
 `100 * (p_final[called] - p_final[opposite])`, the final blend's own net
-lean toward the called direction versus its opposite -- verified directly
-in this module's test suite, not merely asserted. A signal that actually
-disagrees with the ensemble's called direction (despite being outweighted
-by the others) produces a genuinely NEGATIVE `impact_pct` under this
-formula -- this is how the format's "+/-" mix (e.g. "RSI bearish
-divergence" reading negative in a bullish setup) arises here, from a
-single uniform formula applied to all five signals, not two different
-formulas for the positive and negative sides.
+lean -- verified directly in this module's test suite, not merely
+asserted. A signal that actually disagrees with the ensemble's called
+direction (despite being outweighted by the others) produces a genuinely
+NEGATIVE `impact_pct` under this formula -- this is how the spec format's
+"+/-" mix arises here, from a single uniform formula applied to all five
+signals, not two different formulas for the positive and negative sides.
+
+NOTE on the identity vs. the RENDERED lines: `contributions_from_ensemble`
+drops contributions below `min_abs_pct_to_show` from the rendered
+breakdown, so the DISPLAYED lines need not sum to the full net lean. Any
+statement this module makes about overall conviction is therefore taken
+from `EnsembleForecast`'s own probabilities (see `net_lean_pct`), never
+from summing the filtered display lines.
 
 The Adaptive doc's own example output additionally shows contribution
 lines that are NOT among the ensemble's five formal inputs at all (e.g.
@@ -71,55 +111,50 @@ subtle, methodological error). A caller that has such signals available
 (e.g. from `volatility_classifier.VolatilityStateResult`, or a raw
 struct/momentum flag) can construct additional `SignalContribution`
 entries directly and pass them into `explain()` alongside the ensemble-
-derived ones -- this module renders whatever structured contributions
-it's given, from any source; it only computes the five formal ones itself
+derived ones -- this module renders whatever structured contributions it
+is given, from any source; it only computes the five formal ones itself
 because those alone have an exact, provable formula behind them.
 
 95% CI on the direction probability -- an approximation, clearly labeled
 as one. The Adaptive doc's own example ties the CI directly to N ("95%
 CI: 66%-81%, N=187 independent analogues"), so `direction_probability_ci`
-uses a standard Wilson score interval (a well-established, standard
-statistical method -- not invented here) treating the ensemble's called
-probability as if it were a proportion estimated from N independent
-Bernoulli trials, with N = Component A's own `analog_n_independent`. This
-is a real approximation, not a rigorous derivation: N is genuinely only
-Component A's independent-analogue count, not a sample size behind the
-other four blended signals. Returns None (rendered as "unavailable") when
-Component A did not contribute a valid forecast (`analog_is_valid=False`)
--- fabricating a CI with no analog sample behind it at all would be worse
-than omitting one.
+uses a standard Wilson score interval (a well-established statistical
+method -- not invented here) treating the ensemble's called probability
+as if it were a proportion estimated from N independent Bernoulli trials,
+with N = Component A's own `analog_n_independent`. This is a real
+approximation, not a rigorous derivation: N is genuinely only Component
+A's independent-analogue count, not a sample size behind the other four
+blended signals. Returns None (rendered as "unavailable") when Component
+A did not contribute a valid forecast -- fabricating a CI with no analog
+sample behind it would be worse than omitting one.
 
-Live prose generation -- cheap/fast model tier, numeric-safety boundary.
-Per the Prompt Playbook's 2F build instruction ("Haiku-tier API call for
-live text"), `AnthropicProseGenerator` calls the Anthropic API with a
-cheap, fast model to turn each contribution's already-computed structured
-facts (label, detail string) into a short natural-language phrase. The
-model is NEVER shown, and never asked to produce, any of this module's
-actual numbers (percentages, N, EV, position size) -- it only phrases the
-descriptive text for each contribution; every number in the final
-rendered report always comes from this module's own arithmetic,
-regardless of which prose path (live or template) produced the
-descriptive text around it. This is a deliberate defense-in-depth
-boundary: an LLM has no way to corrupt a number it is never given.
+Edge cases are handled EXPLICITLY rather than papered over -- this is the
+main practical advantage of a rule-based renderer, since a generative
+model would happily produce fluent text for any of them:
 
-Graceful degradation (Done-when bar: "degrades gracefully if the API call
-fails"). `ExplainabilityEngine.explain()` treats ANY failure of the live
-prose path -- network error, auth error, timeout, malformed/incomplete
-JSON response, or any other exception a caller-injected prose generator
-raises -- identically: catch it, fall back to a deterministic,
-template-based phrase for EVERY contribution (all-or-nothing, never a
-partial mix of live and template phrasing within one report), and report
-`used_live_api=False` on the result so the fallback is visible, not
-silent. `enable_live_api=False` skips the live path entirely (useful for
-tests, cost control, or deterministic/offline runs) -- verified directly
-in this module's tests that the API path is never even attempted when the
-flag is off, not merely that its result is ignored.
+  - Near-zero attribution: when the ensemble's net lean is below
+    `NEGLIGIBLE_NET_LEAN_PCT`, the narrative says so plainly instead of
+    naming a "dominant" driver of an essentially undecided call.
+  - Ties between top contributors: detected within `TIE_TOLERANCE_PCT`
+    and reported AS a tie ("carry equal weight"), never resolved by
+    arbitrarily naming whichever happened to sort first. Sorting is
+    additionally made total (label as final tiebreak) so ordering is
+    reproducible regardless of upstream dict order.
+  - Missing/degraded data: `SignalContribution.is_degraded` marks a line
+    built from incomplete inputs; degraded lines are called out in a
+    dedicated "Data quality" section rather than silently rendered as if
+    fully supported. An invalid Component A also degrades the CI, which
+    renders as "unavailable" rather than as a fabricated interval.
+  - Ensemble weight instability: surfaced in the spec's own stability
+    line AND, when UNSTABLE, as an explicit leading caveat in the
+    narrative -- because in that state the attribution percentages
+    themselves are the thing under suspicion, so a reader must not take
+    the breakdown at face value.
 """
 
-import json
 import math
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -146,13 +181,13 @@ EV_LOWER_CI_GATE_PCT = 0.15
 CI_Z_SCORE_95 = 1.96
 
 # Judgment calls (NOT MASTER_CONTEXT/Adaptive-doc numbers -- no source doc
-# specifies a model, token budget, timeout, or display-filtering threshold
-# for this layer; "Haiku-tier" is the Prompt Playbook's own wording, not a
-# specific model ID).
-DEFAULT_PROSE_MODEL = "claude-haiku-4-5-20251001"
-DEFAULT_PROSE_MAX_TOKENS = 600
-DEFAULT_PROSE_TIMEOUT_SECONDS = 8.0
-DEFAULT_MIN_ABS_PCT_TO_SHOW = 1.0  # contributions below this magnitude are dropped from the rendered breakdown
+# specifies display-filtering, tie, or negligibility thresholds for this
+# layer). Named and importable so tests and callers can reference them
+# rather than re-hardcoding, matching the convention used across
+# `macro_mtf_liquidity_vol/`.
+DEFAULT_MIN_ABS_PCT_TO_SHOW = 1.0  # contributions smaller than this are dropped from the breakdown
+TIE_TOLERANCE_PCT = 0.5  # two contributions within this many points are reported as tied
+NEGLIGIBLE_NET_LEAN_PCT = 2.0  # below this net lean, the call is described as essentially undecided
 
 _DISPLAY_LABELS: Dict[str, str] = {
     "component_a": "Historical analog match",
@@ -165,12 +200,23 @@ _DISPLAY_LABELS: Dict[str, str] = {
 _SETUP_LABELS: Dict[str, str] = {"up": "LONG SETUP", "down": "SHORT SETUP", "neutral": "NO SETUP"}
 _DIRECTIONAL_ADJECTIVE: Dict[str, str] = {"up": "Bullish", "down": "Bearish", "neutral": "Neutral"}
 
-
-class ProseGenerationError(Exception):
-    """Raised internally whenever the live prose path fails for any reason
-    (network, auth, timeout, malformed/incomplete response). Caught by
-    `ExplainabilityEngine.explain()` to trigger the template fallback --
-    never expected to escape this module's own public methods."""
+# Pre-written sentence structures, selected by macro regime state. Keys are
+# `macro_regime.MacroRegimeResult.state`'s exact four values.
+_MACRO_REGIME_SENTENCES: Dict[str, str] = {
+    "Risk-On": "Macro backdrop is Risk-On, which permits full standard EV thresholds.",
+    "Risk-Off": (
+        "Macro backdrop is Risk-Off, which blocks new long entries in risk assets "
+        "regardless of this setup's other merits."
+    ),
+    "Transitional": (
+        "Macro backdrop is Transitional, so position sizes are halved and a more "
+        "conservative EV threshold applies."
+    ),
+    "Macro-Event Window": (
+        "A scheduled high-impact macro event is within 24 hours, which blocks new "
+        "entries outright."
+    ),
+}
 
 
 # ------------------------------------------------------------------------ #
@@ -183,14 +229,19 @@ class SignalContribution:
     """One line item in the 'Signal contributions' breakdown: a label
     (matches an `ensemble.SIGNAL_NAMES` entry for ensemble-derived
     contributions, or any caller-chosen id for additional context lines),
-    a plain deterministic detail string (used for the template fallback
-    and as grounding context for the live prose path), and a signed
-    percentage-point impact (always this module's own number -- never
-    supplied or altered by the LLM, see module docstring)."""
+    a plain deterministic detail string, and a signed percentage-point
+    impact.
+
+    `is_degraded` marks a contribution computed from incomplete or
+    unavailable upstream data. It does not change the arithmetic -- it
+    drives the "Data quality" section, so a reader can tell a well-founded
+    line from one standing on a gap, instead of both rendering identically.
+    """
 
     label: str
     detail: str
     impact_pct: float
+    is_degraded: bool = False
 
     def __post_init__(self) -> None:
         if not self.label.strip():
@@ -198,7 +249,9 @@ class SignalContribution:
         if not self.detail.strip():
             raise ValueError("SignalContribution.detail must be non-empty.")
         if not np.isfinite(self.impact_pct):
-            raise ValueError(f"SignalContribution.impact_pct must be finite, got {self.impact_pct}.")
+            raise ValueError(
+                f"SignalContribution.impact_pct must be finite, got {self.impact_pct}."
+            )
 
 
 @dataclass(frozen=True)
@@ -217,7 +270,10 @@ class TradeRiskSummary:
             if not np.isfinite(v):
                 raise ValueError(f"TradeRiskSummary.{name} must be finite, got {v}.")
         if self.position_size_pct < 0:
-            raise ValueError(f"TradeRiskSummary.position_size_pct must be non-negative, got {self.position_size_pct}.")
+            raise ValueError(
+                f"TradeRiskSummary.position_size_pct must be non-negative, "
+                f"got {self.position_size_pct}."
+            )
 
 
 # ------------------------------------------------------------------------ #
@@ -225,29 +281,54 @@ class TradeRiskSummary:
 # ------------------------------------------------------------------------ #
 
 
-def _default_detail_for_signal(name: str, signals: EnsembleSignalSet) -> str:
+def _detail_for_signal(name: str, signals: EnsembleSignalSet) -> Tuple[str, bool]:
+    """Returns (detail_string, is_degraded) for one ensemble signal.
+
+    Every branch returns a non-empty string for every reachable input
+    state -- including the degraded ones -- so no rendered field can come
+    out blank (Done-when bar 4).
+    """
     if name == "component_a":
         a = signals.component_a
         if not a.is_valid:
-            return "insufficient independent analogues"
-        return f"N={a.n_independent}, distance threshold {a.distance_threshold:.3g}"
+            # Reachable and expected: Component A withholds a forecast below
+            # the N>=50 independent-instances gate (MASTER_CONTEXT
+            # constraint 9), which is correct conservative behaviour, not an
+            # error -- but it IS degraded input for an explanation.
+            return "no valid analog forecast (below minimum independent-sample gate)", True
+        return f"N={a.n_independent}, distance threshold {a.distance_threshold:.3g}", False
     if name == "component_b":
         b = signals.component_b
         probs = {"down": b.p_down, "neutral": b.p_neutral, "up": b.p_up}
-        called = max(probs, key=probs.get)
-        return f"called {called} at {probs[called]:.0%} confidence"
+        called = max(probs, key=lambda k: (probs[k], k))  # total order -> deterministic on ties
+        return f"called {called} at {probs[called]:.0%} confidence", False
     if name == "macro_regime":
         m = signals.macro_regime
-        return f"{m.state}, confidence {m.confidence:.2f}"
+        return f"{m.state}, confidence {m.confidence:.2f}", False
     if name == "mtf_alignment":
         t = signals.mtf_alignment
-        return f"{t.score}/4 {t.dominant_direction}"
+        return f"{t.score}/4 {t.dominant_direction}", False
     if name == "liquidity_trap":
         lq = signals.liquidity_trap
         if lq.sweep_just_confirmed:
-            return f"{lq.sweep_direction} sweep confirmed, probability {lq.trap_probability:.0%}"
-        return f"no confirmed sweep, trap probability {lq.trap_probability:.0%}"
-    raise ValueError(f"no default detail formatter for signal {name!r}.")  # unreachable for ensemble.SIGNAL_NAMES
+            return (
+                f"{lq.sweep_direction} sweep confirmed, probability "
+                f"{lq.trap_probability:.0%}"
+            ), False
+        return f"no confirmed sweep, trap probability {lq.trap_probability:.0%}", False
+    raise ValueError(f"no detail formatter for signal {name!r}.")  # unreachable for SIGNAL_NAMES
+
+
+def _contribution_sort_key(c: "SignalContribution") -> Tuple[int, float, str]:
+    """Positive contributions first (largest first), then negative (largest
+    magnitude first) -- matching the Adaptive doc's example ordering.
+
+    `label` is the final tiebreak so the ordering is TOTAL: two
+    contributions with identical impact must not be able to swap places
+    between runs based on upstream dict insertion order. That would break
+    the byte-for-byte determinism guarantee this module makes.
+    """
+    return (0 if c.impact_pct >= 0 else 1, -abs(c.impact_pct), c.label)
 
 
 def contributions_from_ensemble(
@@ -260,12 +341,13 @@ def contributions_from_ensemble(
 ) -> List[SignalContribution]:
     """
     The five ensemble-level contribution lines -- see module docstring for
-    the exact formula and its provable sum-to-net-lean identity. Sorted
-    positive-first (largest first), then negative (largest magnitude
-    first) -- matching the Adaptive doc's example ordering. Contributions
-    with `|impact_pct| < min_abs_pct_to_show` (a judgment call, not a spec
-    number -- avoids a "+0%"/"-0%" line for a signal that barely moved the
-    needle) are dropped.
+    the exact formula and its provable sum-to-net-lean identity.
+
+    Contributions with `|impact_pct| < min_abs_pct_to_show` are dropped
+    (a judgment call, not a spec number -- it avoids a "+0%"/"-0%" line for
+    a signal that barely moved the needle). Because of that filter the
+    returned lines need not sum to the full net lean; see the module
+    docstring's NOTE.
     """
     called_idx = ensemble.DIRECTION_CLASSES.index(forecast.called_direction)
     if forecast.called_direction == "up":
@@ -276,13 +358,15 @@ def contributions_from_ensemble(
         opposite_idx = None
 
     _, per_signal = ensemble.blend_signals_detailed(
-        signals, forecast.weights_used,
+        signals,
+        forecast.weights_used,
         min_independent_instances=min_independent_instances,
         analog_confidence_ramp_multiple=analog_confidence_ramp_multiple,
     )
 
-    down_idx, up_idx = ensemble.DIRECTION_CLASSES.index("down"), ensemble.DIRECTION_CLASSES.index("up")
-    contributions = []
+    down_idx = ensemble.DIRECTION_CLASSES.index("down")
+    up_idx = ensemble.DIRECTION_CLASSES.index("up")
+    contributions: List[SignalContribution] = []
     for name, (w, dist) in per_signal.items():
         if opposite_idx is not None:
             net_lean = dist[called_idx] - dist[opposite_idx]
@@ -291,10 +375,13 @@ def contributions_from_ensemble(
         impact_pct = 100.0 * w * net_lean
         if abs(impact_pct) < min_abs_pct_to_show:
             continue
-        contributions.append(SignalContribution(
-            label=name, detail=_default_detail_for_signal(name, signals), impact_pct=impact_pct,
-        ))
-    return sorted(contributions, key=lambda c: (0 if c.impact_pct >= 0 else 1, -abs(c.impact_pct)))
+        detail, degraded = _detail_for_signal(name, signals)
+        contributions.append(
+            SignalContribution(
+                label=name, detail=detail, impact_pct=impact_pct, is_degraded=degraded
+            )
+        )
+    return sorted(contributions, key=_contribution_sort_key)
 
 
 # ------------------------------------------------------------------------ #
@@ -320,117 +407,207 @@ def direction_probability_ci(forecast: EnsembleForecast) -> Optional[Tuple[float
     return _wilson_score_interval(forecast.called_probability, forecast.analog_n_independent)
 
 
+def net_lean_pct(forecast: EnsembleForecast) -> float:
+    """The ensemble's own net conviction, in percentage points: the called
+    class's probability minus its most direct opposite.
+
+    Taken from `EnsembleForecast` rather than by summing the rendered
+    contribution lines, because those are filtered for display (see the
+    module docstring's NOTE) and would understate conviction whenever
+    several small contributions were dropped.
+    """
+    probs = forecast.direction_probabilities
+    called = forecast.called_direction
+    if called == "up":
+        return 100.0 * (probs["up"] - probs["down"])
+    if called == "down":
+        return 100.0 * (probs["down"] - probs["up"])
+    return 100.0 * (probs["neutral"] - max(probs["down"], probs["up"]))
+
+
 # ------------------------------------------------------------------------ #
-# Prose generation: template fallback + live API path
+# Rule-based prose: attribution pattern -> pre-written sentence structure
 # ------------------------------------------------------------------------ #
 
 
-def _template_prose(contribution: SignalContribution) -> str:
-    display = _DISPLAY_LABELS.get(contribution.label, contribution.label.replace("_", " ").title())
-    return f"{display} ({contribution.detail})"
+def _display_label(label: str) -> str:
+    return _DISPLAY_LABELS.get(label, label.replace("_", " ").title())
 
 
-def _validate_and_normalize_phrases(
-    phrases: Dict[str, str], contributions: Sequence[SignalContribution],
-) -> Dict[str, str]:
-    """Applied to EVERY prose source (live or a caller-injected generator)
-    -- a badly-behaved custom generator must trigger the same safe
-    fallback a live-API failure does, not propagate a partially-broken
-    result."""
-    normalized: Dict[str, str] = {}
-    missing = []
-    for c in contributions:
-        phrase = phrases.get(c.label)
-        if not isinstance(phrase, str) or not phrase.strip():
-            missing.append(c.label)
-            continue
-        normalized[c.label] = phrase.strip()
-    if missing:
-        raise ProseGenerationError(f"prose generator returned no usable phrase for: {missing}")
-    return normalized
+def _phrase_for(contribution: SignalContribution) -> str:
+    """The contribution line's phrase: `Display label (concrete detail)` --
+    exactly the shape the Adaptive doc's example uses ("Macro regime
+    (Risk-On, confidence 0.81)"). Pure string formatting; the detail is
+    passed through verbatim from upstream, never paraphrased."""
+    return f"{_display_label(contribution.label)} ({contribution.detail})"
 
 
-def _build_prose_prompt(contributions: Sequence[SignalContribution]) -> str:
-    lines = [
-        f'- id: "{c.label}", detail: "{c.detail}"'
-        for c in contributions
-    ]
+def _top_contributors(
+    contributions: Sequence[SignalContribution], tie_tolerance_pct: float
+) -> List[SignalContribution]:
+    """The joint-strongest contributions BY MAGNITUDE, as a list so a tie is
+    representable rather than silently resolved. Returns [] for no input."""
+    if not contributions:
+        return []
+    ranked = sorted(contributions, key=lambda c: (-abs(c.impact_pct), c.label))
+    leader = abs(ranked[0].impact_pct)
+    return [c for c in ranked if leader - abs(c.impact_pct) <= tie_tolerance_pct]
+
+
+def _narrative_dominance_sentence(
+    contributions: Sequence[SignalContribution],
+    net_lean: float,
+    negligible_net_lean_pct: float,
+    tie_tolerance_pct: float,
+) -> str:
+    """Rule: attribution pattern -> pre-written sentence structure.
+
+    Ordered most-specific-first, so the degenerate cases (no lines at all;
+    an essentially undecided call) are never described in the language of a
+    confident, dominated one.
+    """
+    if not contributions:
+        return (
+            "No individual signal cleared the reporting threshold: this call rests on "
+            "the combination of several individually negligible contributions."
+        )
+    if abs(net_lean) < negligible_net_lean_pct:
+        return (
+            f"Overall conviction is negligible (net lean {net_lean:+.1f} points): the "
+            f"signals substantially offset one another, so no factor should be read as "
+            f"driving this call."
+        )
+
+    leaders = _top_contributors(contributions, tie_tolerance_pct)
+    if len(leaders) > 1:
+        names = ", ".join(_display_label(c.label) for c in leaders[:-1])
+        names = f"{names} and {_display_label(leaders[-1].label)}"
+        return (
+            f"{names} carry effectively equal weight here "
+            f"(each about {abs(leaders[0].impact_pct):.0f} points); no single factor "
+            f"dominates."
+        )
+
+    top = leaders[0]
+    if top.impact_pct >= 0:
+        return (
+            f"{_display_label(top.label)} is the dominant supporting factor at "
+            f"{top.impact_pct:+.0f} points ({top.detail})."
+        )
     return (
-        "You are formatting trade-signal explanations for a systematic trading "
-        "system's audit log. For each signal below, write ONE short (under 12 "
-        "words) natural-language phrase in the style "
-        '"Market structure (BOS + CHOCH confirmed, 4H)" or '
-        '"Multi-timeframe alignment (4/4 bullish)" -- a short label followed by '
-        "a parenthetical with the concrete detail. Do NOT include any percentage "
-        "numbers, and do not invent facts beyond the detail given.\n\n"
-        "Signals:\n" + "\n".join(lines) + "\n\n"
-        "Respond with ONLY a JSON object mapping each id to its phrase, no other "
-        'text, e.g. {"component_a": "...", "macro_regime": "..."}'
+        f"The single strongest factor is {_display_label(top.label)} at "
+        f"{top.impact_pct:+.0f} points, and it argues AGAINST this call "
+        f"({top.detail}); the setup is carried by weaker, more numerous supporting "
+        f"signals."
     )
 
 
-def _extract_json_object(text: str) -> dict:
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ProseGenerationError(f"no JSON object found in prose response: {text[:200]!r}")
-    return json.loads(text[start : end + 1])
+def _narrative_ev_sentence(risk: TradeRiskSummary, gate_passes: bool) -> str:
+    """Rule: EV pass/fail -> pre-written sentence structure."""
+    if gate_passes:
+        return (
+            f"EV clears the gate: the lower CI bound of {risk.ev_lower_ci_pct:+.2f}% "
+            f"exceeds the required +{EV_LOWER_CI_GATE_PCT:.2f}%, so the trade is "
+            f"permitted on expected value."
+        )
+    return (
+        f"EV FAILS the gate: the lower CI bound of {risk.ev_lower_ci_pct:+.2f}% does not "
+        f"exceed the required +{EV_LOWER_CI_GATE_PCT:.2f}%, so this trade must not be "
+        f"taken on expected value regardless of the signal picture above."
+    )
 
 
-class AnthropicProseGenerator:
+def _narrative_stability_sentence(
+    stability: Optional[WeightStabilityReport], used_fallback: bool
+) -> Optional[str]:
+    """Rule: ensemble weight instability -> a LEADING caveat.
+
+    When weights are unstable the attribution percentages are themselves
+    the quantity under suspicion, so this is stated before the breakdown is
+    interpreted, not appended as a footnote.
     """
-    Live prose generator -- Anthropic API, cheap/fast ("Haiku-tier") model
-    per the Prompt Playbook's 2F build instruction. Constructs its client
-    LAZILY, on first actual call, never at `__init__` -- so building an
-    `ExplainabilityEngine(enable_live_api=True)` never requires an API key
-    by itself; only actually generating prose does (and if that fails for
-    any reason, `explain()` falls back to the template path -- see module
-    docstring).
-    """
+    if stability is not None and stability.status == "UNSTABLE":
+        signal = stability.triggering_signal or "an unidentified signal"
+        delta = (
+            "unknown" if stability.max_abs_delta is None else f"{stability.max_abs_delta:.2f}"
+        )
+        return (
+            f"WARNING -- ensemble weights are UNSTABLE (max fold delta {delta}, flagged on "
+            f"{_display_label(signal)}). The contribution percentages below depend on those "
+            f"weights and should not be relied on until the instability is diagnosed."
+        )
+    if used_fallback:
+        return (
+            "Note: the ensemble is using its equal-weight fallback, so contributions "
+            "reflect equal weighting rather than fitted weights."
+        )
+    if stability is None or stability.status == "NOT_EVALUATED":
+        return (
+            "Note: ensemble weight stability has not been evaluated (fewer than two folds "
+            "observed), so weight reliability is unknown."
+        )
+    return None
 
-    def __init__(
-        self,
-        model: str = DEFAULT_PROSE_MODEL,
-        max_tokens: int = DEFAULT_PROSE_MAX_TOKENS,
-        timeout: float = DEFAULT_PROSE_TIMEOUT_SECONDS,
-    ) -> None:
-        self.model = model
-        self.max_tokens = max_tokens
-        self.timeout = timeout
-        self._client = None
 
-    def _get_client(self):
-        if self._client is None:
-            import anthropic  # imported lazily -- see class docstring
-            self._client = anthropic.Anthropic(timeout=self.timeout)
-        return self._client
+def _narrative_data_quality_sentence(
+    contributions: Sequence[SignalContribution], ci_available: bool
+) -> Optional[str]:
+    degraded = sorted({c.label for c in contributions if c.is_degraded})
+    parts: List[str] = []
+    if degraded:
+        names = ", ".join(_display_label(label) for label in degraded)
+        parts.append(f"built on incomplete upstream data: {names}")
+    if not ci_available:
+        parts.append(
+            "no analog sample was available, so the probability interval is unavailable "
+            "rather than estimated"
+        )
+    if not parts:
+        return None
+    return "Data quality -- " + "; ".join(parts) + "."
 
-    def __call__(self, contributions: Sequence[SignalContribution]) -> Dict[str, str]:
-        return self.generate(contributions)
 
-    def generate(self, contributions: Sequence[SignalContribution]) -> Dict[str, str]:
-        import anthropic  # local import: only required when the live path actually runs
+def _build_narrative(
+    contributions: Sequence[SignalContribution],
+    forecast: EnsembleForecast,
+    risk: TradeRiskSummary,
+    gate_passes: bool,
+    stability: Optional[WeightStabilityReport],
+    macro_regime_state: Optional[str],
+    ci_available: bool,
+    *,
+    negligible_net_lean_pct: float,
+    tie_tolerance_pct: float,
+) -> List[str]:
+    """Assembles the rule-selected sentences, in a fixed order. Every
+    sentence is chosen by an explicit branch above; none is generated."""
+    sentences: List[str] = []
 
-        try:
-            client = self._get_client()
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                messages=[{"role": "user", "content": _build_prose_prompt(contributions)}],
-            )
-            text = "".join(
-                block.text for block in response.content if getattr(block, "type", None) == "text"
-            )
-            parsed = _extract_json_object(text)
-        except ProseGenerationError:
-            raise
-        except (anthropic.AnthropicError, json.JSONDecodeError) as exc:
-            raise ProseGenerationError(f"live prose generation failed: {exc}") from exc
-        except Exception as exc:
-            raise ProseGenerationError(f"live prose generation failed unexpectedly: {exc}") from exc
+    caveat = _narrative_stability_sentence(stability, forecast.used_fallback_equal_weighting)
+    if caveat is not None:
+        sentences.append(caveat)
 
-        if not isinstance(parsed, dict):
-            raise ProseGenerationError(f"live prose response was not a JSON object: {type(parsed).__name__}")
-        return _validate_and_normalize_phrases(parsed, contributions)
+    sentences.append(
+        _narrative_dominance_sentence(
+            contributions, net_lean_pct(forecast), negligible_net_lean_pct, tie_tolerance_pct
+        )
+    )
+
+    if macro_regime_state is not None:
+        macro_sentence = _MACRO_REGIME_SENTENCES.get(
+            macro_regime_state,
+            f"Macro regime reported as {macro_regime_state}, which has no mapped "
+            f"trading implication in this renderer.",
+        )
+        sentences.append(macro_sentence)
+
+    sentences.append(_narrative_ev_sentence(risk, gate_passes))
+
+    quality = _narrative_data_quality_sentence(contributions, ci_available)
+    if quality is not None:
+        sentences.append(quality)
+
+    return sentences
 
 
 # ------------------------------------------------------------------------ #
@@ -443,7 +620,8 @@ class RenderedContributionLine:
     label: str
     detail: str
     impact_pct: float
-    prose: str  # the phrase actually used -- live-generated or template fallback
+    prose: str  # the template-built phrase actually rendered
+    is_degraded: bool = False
 
 
 @dataclass(frozen=True)
@@ -462,8 +640,10 @@ class ExplainabilityOutput:
     position_size_pct: float
     stability_status: str  # "STABLE" | "UNSTABLE" | "NOT_EVALUATED"
     used_fallback_equal_weighting: bool
-    used_live_api: bool
-    report_text: str
+    net_lean_pct: float
+    narrative: List[str] = field(default_factory=list)
+    spec_report_text: str = ""  # the Adaptive doc's exact format, section-for-section
+    report_text: str = ""  # spec_report_text plus the rule-based Assessment block
 
 
 def _format_ci(ci_lower_pct: Optional[float], ci_upper_pct: Optional[float], n: int) -> str:
@@ -472,36 +652,44 @@ def _format_ci(ci_lower_pct: Optional[float], ci_upper_pct: Optional[float], n: 
     return f"95% CI: {ci_lower_pct:.0f}%–{ci_upper_pct:.0f}%, N={n} independent analogues"
 
 
-def _format_stability(stability: Optional[WeightStabilityReport], used_fallback: bool) -> str:
+def _format_stability(
+    stability: Optional[WeightStabilityReport], used_fallback: bool
+) -> str:
     suffix = " (using equal-weight fallback)" if used_fallback else ""
     if stability is None or stability.status == "NOT_EVALUATED":
         return f"Ensemble weight stability: NOT_EVALUATED (fewer than 2 folds observed){suffix}"
+    delta = "unknown" if stability.max_abs_delta is None else f"{stability.max_abs_delta:.2f}"
     if stability.status == "STABLE":
-        return f"Ensemble weight stability: STABLE (max fold delta: {stability.max_abs_delta:.2f}){suffix}"
+        return f"Ensemble weight stability: STABLE (max fold delta: {delta}){suffix}"
     return (
-        f"Ensemble weight stability: UNSTABLE (max fold delta: {stability.max_abs_delta:.2f}, "
+        f"Ensemble weight stability: UNSTABLE (max fold delta: {delta}, "
         f"flagged on {stability.triggering_signal}){suffix}"
     )
 
 
-def _render_report_text(
+def _render_spec_report(
     asset: str,
     setup_label: str,
     directional_adjective: str,
     called_probability_pct: float,
     ci_line: str,
-    lines: List[RenderedContributionLine],
+    lines: Sequence[RenderedContributionLine],
     risk: TradeRiskSummary,
     gate_passes: bool,
     stability_line: str,
 ) -> str:
-    body_lines = []
+    """The Adaptive doc's Layer 8 output format, section-for-section:
+    header / probability+CI / signal contributions / EV estimate / EV lower
+    CI bound with gate verdict / position size / stability."""
+    body_lines: List[str] = []
     if lines:
         prefixes = [f"  {'+' if line.impact_pct >= 0 else '-'} {line.prose}:" for line in lines]
         width = max(len(p) for p in prefixes)
         for prefix, line in zip(prefixes, lines):
             body_lines.append(f"{prefix.ljust(width)} {line.impact_pct:+.0f}%")
-    contributions_block = "\n".join(body_lines) if body_lines else "  (no individually significant contributions)"
+    contributions_block = (
+        "\n".join(body_lines) if body_lines else "  (no individually significant contributions)"
+    )
 
     gate_word = "passes" if gate_passes else "FAILS"
     return (
@@ -519,51 +707,32 @@ def _render_report_text(
 
 class ExplainabilityEngine:
     """
-    Renders one `ExplainabilityOutput` per call to `explain()`. See module
-    docstring for the full design: this class computes nothing about the
-    trade itself -- it formats already-computed inputs, using either a
-    live Anthropic API call (cheap/fast tier) or a deterministic template
-    to phrase each contribution line.
+    Renders one `ExplainabilityOutput` per call to `explain()`.
+
+    Pure template/rule-based and fully deterministic: no LLM, no network,
+    no API key, no randomness, no clock. The same inputs produce
+    byte-for-byte identical output on every run, forever -- asserted
+    directly by this module's test suite, because an audit log that cannot
+    be reproduced cannot be audited.
     """
 
     def __init__(
         self,
-        enable_live_api: bool = True,
-        prose_generator: Optional[Callable[[Sequence[SignalContribution]], Dict[str, str]]] = None,
-        model: str = DEFAULT_PROSE_MODEL,
-        max_tokens: int = DEFAULT_PROSE_MAX_TOKENS,
-        timeout: float = DEFAULT_PROSE_TIMEOUT_SECONDS,
+        *,
+        min_abs_pct_to_show: float = DEFAULT_MIN_ABS_PCT_TO_SHOW,
+        tie_tolerance_pct: float = TIE_TOLERANCE_PCT,
+        negligible_net_lean_pct: float = NEGLIGIBLE_NET_LEAN_PCT,
     ) -> None:
-        """
-        Parameters
-        ----------
-        enable_live_api : bool
-            The Done-when bar's "config flag to swap in a template-based
-            fallback". False forces the template path unconditionally --
-            the live generator (real or injected) is never even called
-            (verified directly in this module's tests, not just that its
-            result would be ignored).
-        prose_generator : callable, optional
-            Dependency injection point for tests (and for swapping in a
-            different provider without subclassing) -- any
-            `Callable[[Sequence[SignalContribution]], Dict[str, str]]`.
-            When omitted, a real `AnthropicProseGenerator` is constructed
-            lazily on first use (never at `__init__` -- see that class's
-            docstring).
-        """
-        self.enable_live_api = enable_live_api
-        self._injected_generator = prose_generator
-        self._model, self._max_tokens, self._timeout = model, max_tokens, timeout
-        self._lazy_generator: Optional[AnthropicProseGenerator] = None
-
-    def _get_generator(self) -> Callable[[Sequence[SignalContribution]], Dict[str, str]]:
-        if self._injected_generator is not None:
-            return self._injected_generator
-        if self._lazy_generator is None:
-            self._lazy_generator = AnthropicProseGenerator(
-                model=self._model, max_tokens=self._max_tokens, timeout=self._timeout,
-            )
-        return self._lazy_generator
+        for name, value in (
+            ("min_abs_pct_to_show", min_abs_pct_to_show),
+            ("tie_tolerance_pct", tie_tolerance_pct),
+            ("negligible_net_lean_pct", negligible_net_lean_pct),
+        ):
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative, got {value}.")
+        self.min_abs_pct_to_show = min_abs_pct_to_show
+        self.tie_tolerance_pct = tie_tolerance_pct
+        self.negligible_net_lean_pct = negligible_net_lean_pct
 
     def explain(
         self,
@@ -573,27 +742,35 @@ class ExplainabilityEngine:
         contributions: Sequence[SignalContribution],
         risk: TradeRiskSummary,
         stability: Optional[WeightStabilityReport] = None,
+        macro_regime_state: Optional[str] = None,
     ) -> ExplainabilityOutput:
+        """
+        Parameters
+        ----------
+        macro_regime_state : str, optional
+            Layer 3's `MacroRegimeResult.state`, used to select a
+            pre-written macro sentence. Passed explicitly rather than
+            parsed back out of the macro contribution's `detail` string --
+            reconstructing structured state from rendered text would be
+            exactly the kind of fragile coupling this project avoids.
+            Omitted -> the macro sentence is skipped entirely rather than
+            guessed.
+        """
         if forecast.called_direction not in _SETUP_LABELS:
             raise ValueError(f"unrecognized called_direction {forecast.called_direction!r}.")
+        if not asset.strip():
+            raise ValueError("asset must be a non-empty string.")
 
-        used_live_api = False
-        phrases: Optional[Dict[str, str]] = None
-        if self.enable_live_api and contributions:
-            try:
-                generator = self._get_generator()
-                phrases = _validate_and_normalize_phrases(generator(contributions), contributions)
-                used_live_api = True
-            except Exception:  # noqa: BLE001 -- ANY failure of the live path must degrade gracefully (see module docstring)
-                phrases = None
-                used_live_api = False
-
+        ordered = sorted(contributions, key=_contribution_sort_key)
         rendered = [
             RenderedContributionLine(
-                label=c.label, detail=c.detail, impact_pct=c.impact_pct,
-                prose=(phrases[c.label] if phrases is not None else _template_prose(c)),
+                label=c.label,
+                detail=c.detail,
+                impact_pct=c.impact_pct,
+                prose=_phrase_for(c),
+                is_degraded=c.is_degraded,
             )
-            for c in contributions
+            for c in ordered
         ]
 
         ci = direction_probability_ci(forecast)
@@ -607,17 +784,49 @@ class ExplainabilityEngine:
         stability_line = _format_stability(stability, forecast.used_fallback_equal_weighting)
         ci_line = _format_ci(ci_lower_pct, ci_upper_pct, forecast.analog_n_independent)
 
-        report_text = _render_report_text(
-            asset, setup_label, directional_adjective, called_probability_pct, ci_line,
-            rendered, risk, gate_passes, stability_line,
+        spec_report_text = _render_spec_report(
+            asset,
+            setup_label,
+            directional_adjective,
+            called_probability_pct,
+            ci_line,
+            rendered,
+            risk,
+            gate_passes,
+            stability_line,
         )
 
+        narrative = _build_narrative(
+            ordered,
+            forecast,
+            risk,
+            gate_passes,
+            stability,
+            macro_regime_state,
+            ci_available=ci is not None,
+            negligible_net_lean_pct=self.negligible_net_lean_pct,
+            tie_tolerance_pct=self.tie_tolerance_pct,
+        )
+        narrative_block = "\n".join(f"  {s}" for s in narrative)
+        report_text = f"{spec_report_text}\n\nAssessment:\n{narrative_block}"
+
         return ExplainabilityOutput(
-            asset=asset, setup_label=setup_label, called_direction=forecast.called_direction,
-            called_probability_pct=called_probability_pct, ci_lower_pct=ci_lower_pct, ci_upper_pct=ci_upper_pct,
-            analog_n_independent=forecast.analog_n_independent, contributions=rendered,
-            ev_estimate_pct=risk.ev_estimate_pct, ev_lower_ci_pct=risk.ev_lower_ci_pct, ev_gate_passes=gate_passes,
-            position_size_pct=risk.position_size_pct, stability_status=stability_status,
-            used_fallback_equal_weighting=forecast.used_fallback_equal_weighting, used_live_api=used_live_api,
+            asset=asset,
+            setup_label=setup_label,
+            called_direction=forecast.called_direction,
+            called_probability_pct=called_probability_pct,
+            ci_lower_pct=ci_lower_pct,
+            ci_upper_pct=ci_upper_pct,
+            analog_n_independent=forecast.analog_n_independent,
+            contributions=rendered,
+            ev_estimate_pct=risk.ev_estimate_pct,
+            ev_lower_ci_pct=risk.ev_lower_ci_pct,
+            ev_gate_passes=gate_passes,
+            position_size_pct=risk.position_size_pct,
+            stability_status=stability_status,
+            used_fallback_equal_weighting=forecast.used_fallback_equal_weighting,
+            net_lean_pct=net_lean_pct(forecast),
+            narrative=narrative,
+            spec_report_text=spec_report_text,
             report_text=report_text,
         )
