@@ -1,8 +1,8 @@
 """
 Bridges raw OHLCV -> normalized feature vectors (`features.feature_calculator`)
 + triple-barrier labels (`predictive_core.labeling`) into ONE dataframe with
-the exact column set every downstream consumer (`HistoricalAnalogEngine`,
-`boosted_core`'s trainers, `PredictiveCoreStrategy`, `WalkForwardBacktester`)
+the exact column set every downstream consumer (`boosted_core`'s trainers,
+`WalkForwardBacktester`, and the Stage D meta-label model once it exists)
 actually requires: normalized feature columns + raw 'close'/'high'/'low'
 (/'open'/'volume') + 'direction'/'magnitude'/'duration'.
 
@@ -50,10 +50,9 @@ RAW_ATR_COLUMN = "raw_atr"
 
 
 def feature_columns(df: pd.DataFrame) -> List[str]:
-    """The exact `feature_cols` list to pass to `HistoricalAnalogEngine`,
-    `boosted_core`'s trainers, or `PredictiveCoreStrategy`: every column in
-    `df` produced by `calculate_features()`, i.e. everything that isn't raw
-    OHLCV or a triple-barrier label."""
+    """The exact `feature_cols` list to pass to `boosted_core`'s trainers:
+    every column in `df` produced by `calculate_features()`, i.e. everything
+    that isn't raw OHLCV or a triple-barrier label."""
     return [c for c in df.columns if c.startswith(_FEATURE_COLUMN_PREFIXES)]
 
 
@@ -101,8 +100,7 @@ def build_asset_modeling_frame(
         up index and (b) apply_triple_barrier()'s valid-label index. Columns:
         every `feature_columns()` column, raw 'open'/'high'/'low'/'close'/
         'volume', and 'direction'/'magnitude'/'duration'. Ready to hand to
-        `HistoricalAnalogEngine.fit()`, `boosted_core`'s trainers,
-        `PredictiveCoreStrategy`, or `WalkForwardBacktester.run()` (the last
+        `boosted_core`'s trainers or `WalkForwardBacktester.run()` (the last
         of these still wants one instrument per call -- see its docstring;
         this function must be called once per asset, never on a
         `pool_assets()`-pooled frame, for the same reason

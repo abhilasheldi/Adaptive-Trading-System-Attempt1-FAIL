@@ -45,6 +45,13 @@ from .kill_criteria import (
 )
 from .windows import FoldWindow, generate_walk_forward_windows
 
+# Ceiling on the per-order fee fraction used to carry gap cost into the
+# sizing book. A fraction of 1.0 would hand an entire order to costs; the
+# gap model is already capped at notional inside costs.py, so if this ever
+# binds the two models disagree and that is worth surfacing rather than
+# silently absorbing.
+_MAX_EXIT_FEE_FRACTION = 0.95
+
 
 class Layer14KillCriteriaFailed(RuntimeError):
     """
@@ -433,15 +440,39 @@ class WalkForwardBacktester:
                 max_drawdown=float("nan"), ev_per_trade=float("nan"), n_trades=0,
             )
 
+        # ---------------------------------------------------------------- #
+        # SINGLE BOOK (Stage A.4, finding S12 / Invariant I7)
+        # ---------------------------------------------------------------- #
+        # Previously this ran vectorbt ONCE with fees+slippage only, then
+        # subtracted gap cost from the extracted trades afterwards and built
+        # a SECOND equity curve from the net PnL. That produced two books:
+        #
+        #   book A  vectorbt's internal equity. `size_type='targetpercent'`
+        #           sizes every order as a percentage OF THIS. It never saw
+        #           gap cost, so it sized off an account richer than the one
+        #           being reported. Measured divergence on fold 2: sizing-book
+        #           maxDD 0.013 against a reported 0.270, ~20x.
+        #   book B  the reported equity curve, gap cost deducted.
+        #
+        # I7 requires position sizing to read the same equity the results are
+        # computed from. The fix runs vectorbt a second time with the gap cost
+        # folded into the fee array it already consumes, so the gap charge is
+        # inside the book sizing reads. `pf.value()` is then the ONE equity
+        # curve, and no cost is applied outside it.
+        #
+        # WHY TWO PASSES AND NOT ONE: gap cost depends on each trade's holding
+        # period, which is not known until the trades exist. Pass 1 discovers
+        # the trades, pass 2 prices them. The passes are not iterated to a
+        # fixed point -- charging gap cost lowers equity, which lowers
+        # targetpercent order sizes, which slightly lowers the gap charge. The
+        # residual is reported as `sizing_book_residual` rather than hidden,
+        # so a case where it matters is visible instead of assumed away.
+        base_fees, base_slippage = fees, slippage
+
         pf = vbt.Portfolio.from_orders(
-            close=segment_df["close"],
-            size=order_size,
-            size_type="targetpercent",
-            direction="both",
-            fees=fees,
-            slippage=slippage,
-            freq=self.timeframe,
-            init_cash=self.init_cash,
+            close=segment_df["close"], size=order_size, size_type="targetpercent",
+            direction="both", fees=base_fees, slippage=base_slippage,
+            freq=self.timeframe, init_cash=self.init_cash,
         )
         trades = pf.trades.records_readable
         if trades.empty:
@@ -455,20 +486,46 @@ class WalkForwardBacktester:
 
         trades = cost_model.apply_gap_cost_to_trades(trades, segment_df.index)
 
-        equity_curve = metrics.equity_curve_from_trade_pnls(
-            trades["net_pnl"], trades["Exit Timestamp"], segment_df.index, self.init_cash
-        )
-        # RUIN DETECTION (2026-08-14). The equity curve is a cumulative sum
-        # of realized trade PnL with no bankruptcy floor, so it can and does
-        # cross zero. Once it does, `pct_change()` is dividing by a
-        # zero-or-negative denominator and every subsequent "return" -- and
-        # any Sharpe built from them -- is arithmetically meaningless. The
-        # 2026-08-14 ablation reported maxDD of 1.023 and 1.235 (equity below
-        # zero) alongside a Sharpe that looked BETTER than the solvent
-        # baseline, which is exactly the trap this flag exists to expose.
-        equity_destroyed = bool((equity_curve <= 0).any())
+        gap_fee = self._gap_cost_as_exit_fee(trades, segment_df, pf)
+        if gap_fee is not None:
+            pf = vbt.Portfolio.from_orders(
+                close=segment_df["close"], size=order_size, size_type="targetpercent",
+                direction="both", fees=base_fees + gap_fee, slippage=base_slippage,
+                freq=self.timeframe, init_cash=self.init_cash,
+            )
+            trades = pf.trades.records_readable
+            if trades.empty:
+                return SegmentResult(
+                    segment=segment_name, fold=fold,
+                    trades=pd.DataFrame(columns=empty_trades_cols),
+                    equity_curve=pd.Series(self.init_cash, index=segment_df.index),
+                    returns=pd.Series(dtype=float), sharpe=float("nan"),
+                    profit_factor=float("nan"), max_drawdown=float("nan"),
+                    ev_per_trade=float("nan"), n_trades=0,
+                )
+            # Gap cost now lives INSIDE the portfolio's own PnL. Re-deriving
+            # it here would charge it twice, so net_pnl == PnL by definition.
+            trades["gap_cost"] = 0.0
+            trades["net_pnl"] = trades["PnL"].to_numpy(dtype=float)
+            notional_ = (trades["Size"].abs() * trades["Avg Entry Price"]).to_numpy(dtype=float)
+            trades["net_return"] = np.divide(
+                trades["net_pnl"].to_numpy(), np.where(notional_ > 0, notional_, np.nan),
+                out=np.zeros(len(trades)), where=notional_ > 0,
+            )
 
-        returns = equity_curve.pct_change().dropna()
+        # THE book. Not rebuilt from trade PnL -- read directly from the
+        # portfolio that sized the orders.
+        equity_curve = pd.Series(np.asarray(pf.value()).ravel(), index=segment_df.index)
+
+        # Bankruptcy floor (S11). Ruin is absorbing: once equity touches zero
+        # there is no capital left to trade back with.
+        destroyed_mask = equity_curve <= 0.0
+        equity_destroyed = bool(destroyed_mask.any())
+        if equity_destroyed:
+            first = int(np.argmax(destroyed_mask.to_numpy()))
+            equity_curve.iloc[first:] = 0.0
+
+        returns = equity_curve.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
         sharpe = metrics.sharpe_ratio_from_returns(returns, self.bars_per_year)
         if equity_destroyed:
             # Refuse to publish a number that cannot be compared. maxDD and
@@ -484,6 +541,55 @@ class WalkForwardBacktester:
             returns=returns, sharpe=sharpe, profit_factor=pf_ratio, max_drawdown=max_dd,
             ev_per_trade=ev, n_trades=len(trades), equity_destroyed=equity_destroyed,
         )
+
+    @staticmethod
+    def _gap_cost_as_exit_fee(
+        trades: pd.DataFrame, segment_df: pd.DataFrame, pf
+    ) -> Optional[pd.Series]:
+        """Per-bar fee increment carrying each trade's gap cost at its EXIT bar.
+
+        Converts a per-trade dollar charge into the per-order fee FRACTION
+        vectorbt consumes, so the gap cost enters the same book that sizing
+        reads (I7) instead of being subtracted afterwards.
+
+        Charged at exit, not entry, because the holding period that
+        determines the charge is only known once the trade closes. That
+        timing is a modelling choice, and it is the conservative one: the
+        capital reduction lands at the end of the hold rather than being
+        spread across it, so intra-trade equity is not flattered.
+
+        Returns None when there is no gap cost to charge, which skips the
+        second vectorbt pass entirely.
+        """
+        if "gap_cost" not in trades.columns:
+            return None
+        gap = trades["gap_cost"].to_numpy(dtype=float)
+        gap = np.nan_to_num(gap, nan=0.0, posinf=0.0, neginf=0.0)
+        if not np.any(gap > 0):
+            return None
+
+        # Dollar gap cost aggregated onto exit bars.
+        by_exit = pd.Series(gap, index=pd.DatetimeIndex(trades["Exit Timestamp"]))
+        by_exit = by_exit.groupby(level=0).sum().reindex(segment_df.index, fill_value=0.0)
+
+        # Order value at each bar, from the pass-1 portfolio. A fee fraction
+        # is applied to order value, so dividing recovers the fraction that
+        # deducts exactly `gap_cost` dollars.
+        order_value = np.abs(np.asarray(pf.orders.records_readable
+                                        .assign(v=lambda d: d["Size"] * d["Price"])
+                                        .groupby("Timestamp")["v"].sum()
+                                        .reindex(segment_df.index, fill_value=0.0)
+                                        .to_numpy(dtype=float)))
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac = np.where(order_value > 0, by_exit.to_numpy() / order_value, 0.0)
+        frac = np.nan_to_num(frac, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # A fee fraction >= 1 would hand the whole order to costs. The gap
+        # model is already capped at notional inside costs.py; this is the
+        # second line of defence at the point where the two models meet.
+        frac = np.clip(frac, 0.0, _MAX_EXIT_FEE_FRACTION)
+        return pd.Series(frac, index=segment_df.index)
 
     # ------------------------------------------------------------------ #
     # Regime-conditional (Risk-On vs aggregate) helpers

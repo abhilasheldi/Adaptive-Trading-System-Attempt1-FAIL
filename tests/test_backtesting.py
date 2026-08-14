@@ -563,19 +563,41 @@ def test_min_oos_trades_per_fold_rejects_negative():
         )
 
 
-def test_ruin_detection_disqualifies_sharpe_and_is_reported():
-    """Sharpe over a non-positive equity curve is arithmetically meaningless
-    (the pct_change denominator crosses zero). The 2026-08-14 ablation
-    reported maxDD 1.023 -- equity below zero -- alongside a Sharpe that
-    looked BETTER than the solvent baseline. That must never be publishable."""
+def test_ruin_is_floored_at_zero_and_maxdd_cannot_exceed_one():
+    """Stage A.4 / S11. This test previously asserted maxDD > 1.0 as 'the
+    signature of negative equity'. That signature is exactly what the
+    bankruptcy floor removes: a drawdown above 100% describes losing more
+    than everything and continuing to trade, and MASTER_CONTEXT_v2 section 7
+    says values >= 1.0 are impossible by construction post-fix.
+
+    Post-fix the curve is pinned at 0 from the first crossing (ruin is
+    absorbing -- there is no capital left to trade back with), so maxDD is
+    exactly 1.0 and never more."""
     from src.backtesting import metrics
 
     idx = pd.date_range("2024-01-01", periods=500, freq="h", tz="UTC")
-    # Cumulative losses far exceeding init_cash -> equity crosses zero.
+    # Cumulative losses far exceeding init_cash -> equity would cross zero.
     pnls = pd.Series(np.full(500, -50.0), index=idx)
     eq = metrics.equity_curve_from_trade_pnls(pnls, pd.Series(idx), idx, 10_000.0)
-    assert (eq <= 0).any()
-    assert metrics.max_drawdown(eq) > 1.0  # >1.0 is the signature of negative equity
+
+    assert (eq == 0).any(), "ruin must be recorded"
+    assert (eq >= 0).all(), "equity must never go negative post-fix"
+    assert metrics.max_drawdown(eq) == pytest.approx(1.0)
+    assert metrics.max_drawdown(eq) <= 1.0
+
+    # Ruin is ABSORBING: once floored, later gains cannot lift it back off 0.
+    # A pointwise clip would have allowed exactly that and understated the damage.
+    mixed = pd.Series([-6000.0] + [-6000.0] + [50_000.0] + [0.0] * 497, index=idx)
+    eq2 = metrics.equity_curve_from_trade_pnls(mixed, pd.Series(idx), idx, 10_000.0)
+    assert eq2.iloc[-1] == 0.0
+
+    # The pre-fix behaviour is still reachable, and still produces the
+    # impossible value -- so this test fails loudly if the floor regresses.
+    unfloored = metrics.equity_curve_from_trade_pnls(
+        pnls, pd.Series(idx), idx, 10_000.0, floor_at_zero=False
+    )
+    assert (unfloored < 0).any()
+    assert metrics.max_drawdown(unfloored) > 1.0
 
 
 # ------------------------------------------------------------------------ #

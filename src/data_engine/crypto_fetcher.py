@@ -17,20 +17,38 @@ logger = logging.getLogger(__name__)
 _TIMEFRAME_TO_MINUTES = {
     "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
     "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
-    "1d": 1440,
+    # 'w' added at Stage B.1: hypothesis condition 4 requires 1H/4H/1D/1W,
+    # and both the table and the fallback parser previously stopped at 'd',
+    # so the weekly timeframe raised rather than resolving.
+    "1d": 1440, "3d": 4320, "1w": 10080,
 }
+
+
+def _pandas_resample_alias(timeframe: str) -> str:
+    """Translate a ccxt timeframe into a pandas offset alias.
+
+    ccxt uses lowercase throughout ('1h', '1d', '1w'). pandas accepts
+    lowercase for minutes/hours/days but DEPRECATED lowercase 'w' -- it
+    still resamples correctly today while emitting a FutureWarning, and will
+    stop working in a later pandas. Translating here keeps ccxt's vocabulary
+    at the call sites and confines the pandas-version detail to one place.
+    """
+    match = re.fullmatch(r"(\d+)([mhdw])", timeframe)
+    if match and match.group(2) == "w":
+        return f"{match.group(1)}W"
+    return timeframe
 
 
 def _timeframe_minutes(timeframe: str) -> int:
     """Resolve a ccxt-style timeframe string (e.g. '1h', '4h', '15m') to minutes."""
     if timeframe in _TIMEFRAME_TO_MINUTES:
         return _TIMEFRAME_TO_MINUTES[timeframe]
-    # Fallback parser for anything not in the table, e.g. '2d'.
-    match = re.fullmatch(r"(\d+)([mhd])", timeframe)
+    # Fallback parser for anything not in the table, e.g. '2d', '2w'.
+    match = re.fullmatch(r"(\d+)([mhdw])", timeframe)
     if not match:
         raise ValueError(f"Cannot parse timeframe minutes from '{timeframe}'")
     qty, unit = int(match.group(1)), match.group(2)
-    return qty * {"m": 1, "h": 60, "d": 1440}[unit]
+    return qty * {"m": 1, "h": 60, "d": 1440, "w": 10080}[unit]
 
 
 def fetch_ohlcv(
@@ -151,7 +169,7 @@ def remove_duplicates_and_skew(df: pd.DataFrame, timeframe: str) -> pd.DataFrame
         "close": "last",
         "volume": "sum",
     }
-    df = df.resample(timeframe).agg(agg_dict).dropna()
+    df = df.resample(_pandas_resample_alias(timeframe)).agg(agg_dict).dropna()
     return df
 
 

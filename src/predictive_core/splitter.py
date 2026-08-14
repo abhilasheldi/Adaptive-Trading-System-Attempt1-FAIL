@@ -1,4 +1,25 @@
-"""Walk-forward temporal splitter for strict train/validation/test partitioning."""
+"""Walk-forward temporal splitter for strict train/validation/test partitioning.
+
+SUPERSEDED AT STAGE A.3. Use `predictive_core.purged_kfold.PurgedKFold`.
+
+This splitter partitions on t0 -- the FEATURE timestamp -- and nothing else.
+Its `_assert_strict_ordering` guard below verifies that train timestamps
+precede val timestamps precede test timestamps, which is true and
+insufficient: a triple-barrier label is not resolved at t0, it is resolved
+at t1. A training sample whose label window reaches into a held-out block
+has a target computed from that block, and this class accepts it.
+
+Measured (scripts/leakage_test.py): under a train 2000 / val 400 / test 400
+layout it leaves 70-101 training samples per fold sharing label-resolution
+bars with the VALIDATION block. Validation drives early stopping and Optuna
+selection, so that contamination reaches the reported test score. Whether it
+also leaks straight into test depends on whether the val block happens to be
+wider than the label horizon -- an accident of window sizing, not a property
+of this class.
+
+RETAINED, not deleted, for exactly one reason: it is the control arm in the
+Gate A leakage comparison. Do not use it to produce results.
+"""
 
 import numpy as np
 import pandas as pd

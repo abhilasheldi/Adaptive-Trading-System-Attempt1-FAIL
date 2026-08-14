@@ -1,6 +1,109 @@
 # Project State
 
-**Last Updated:** 2024-05-24
+**Last Updated:** 2026-08-14
+
+---
+
+# CURRENT STATE — READ THIS FIRST
+
+This file is ~3,800 lines and is an append-only log. **Do not read it end to end.** This block is the
+current position; everything below it is history, oldest first. For detail on any item, jump to the named
+session entry. The entries before the 2026-08-14 Stage 0 teardown describe a codebase that no longer exists.
+
+## Position
+
+**Governing documents:** `architecture/MASTER_CONTEXT_v2.md` and `architecture/BUILD_PLAN_v2.md`. v1 is
+superseded in full.
+
+**Stage 0 (Teardown) — GATE 0 CLEAR.** Awaiting operator sign-off; gates are not self-certified (§10).
+**Stage A (Measurement Apparatus) — all six tasks DONE, GATE A NOT SIGNED OFF.** 4 of 5 acceptance
+conditions met; the fifth is not literally satisfiable (see Open Decisions).
+**Stage B (Data Acquisition) — B.1 DONE. B.2/B.3/B.4 not started. GATE B NOT REACHED.**
+**Stage C (the decisive experiment) — BLOCKED on B.2 vendor procurement.**
+
+Test suite: **361 passed** (excludes `tests/test_binance_real_data.py`, which needs network).
+**Nothing has been committed.** All work is staged with the suite green.
+
+## Gate status
+
+| gate | status |
+|---|---|
+| Gate 0 | **CLEAR** — all 5 tasks; suite green; `src/` grep-clean of deleted components |
+| Gate A | **4 of 5 conditions met** — leakage test passed, n_eff reported everywhere, corrected CIs published, suite green. Fold-2 reproduction not possible |
+| Gate B | **NOT REACHED** — B.1 only; event count not built; ≥200-event kill not evaluated |
+
+## What exists now
+
+**Built and current:** Layer 1 data engine (+ funding, FRED macro, basis, 1D/1W), Layer 2 features (39),
+Layers 3/4/5/6, Layer 9 risk *scoring*, Layer 14 harness (single-book, floored), purged K-Fold + embargo,
+uniqueness/n_eff, trial registry + DSR, ablation flagging (I3-compliant), Layer 10 sizing **stub that
+raises**.
+
+**Deleted at Stage 0 and not coming back:** `HistoricalAnalogEngine` (Component A), the Component B
+direction classifier, `EnsembleMetaModel`/`fit_ensemble_weights`, Layer 8 explainability, both strategy
+adapters, the ablation runner. ~6,973 lines.
+
+**There is no strategy in the repo. Nothing can generate a position.** By design until Stage D.
+
+## The measurement that matters most right now
+
+**S5 did not survive the corrected apparatus** (Stage A.6). Compressed ≤0.20 went from AUC 0.5390
+CI [0.519, 0.559] to **0.5183 CI [0.4986, 0.5374] — the CI now includes 0.5.** The compression gradient
+S5 described inverts, and every subset's CI overlaps the others.
+
+Per BUILD_PLAN_v2's sequencing rationale this **does not terminate the project** — Stage A was deliberately
+structured not to kill on an S5 failure, and Stage C's flow-data test is the decisive experiment. The result
+is carried into Stage C as an input.
+
+Falsification budget: **2 of 3 remaining.** None consumed to date.
+
+## Open decisions that need the operator
+
+1. **Gate A sign-off**, specifically the fold-2 condition. Reproducing fold 2 of `all_layers` is impossible —
+   `Phase2Strategy`, the ablation runner, `HistoricalAnalogEngine` and `EnsembleMetaModel` were all deleted at
+   Stage 0 on instruction, and the surviving JSON has no positions, trades, or equity curve. The mechanism was
+   verified instead on real data at that fold's geometry. **Not recorded as satisfying the original.**
+2. **B.2 vendor procurement** — Tardis / Coinglass / Amberdata / Kaiko. **Liquidations are named in §9 as the
+   highest-priority acquisition and are unobtainable free.** Longest lead-time item; Stage C is blocked behind
+   it. Flagged as Day-1 work six sessions ago, still not begun.
+3. **Which dollar index** — DTWEXBGS (ingested, a *proxy*, different basket to DXY), UUP (in `config.yaml`), or
+   paid DXY. Three are now reachable; Layer 3's "DXY rising" rule will be evaluated against whichever is chosen.
+4. **`realised_return` pricing.** Verified to 1e-16: conditional on `barrier_touched` it is exactly
+   `mult × ATR/entry` and carries **no** path information. Gate D's primary metric (top-decile realised EV)
+   would rank events by entry-bar volatility, not skill. **Gate D is unreadable until this is resolved.**
+
+## Carried forward (known, unresolved, none blocking)
+
+- Uniqueness weighting shifts the class prior (−2.55pp) because `sl` labels resolve faster than `tp` and so
+  score higher uniqueness. AUC is unaffected; logloss-vs-baseline is not comparable across weighted/unweighted.
+  Hits Stage D directly.
+- Vertical-barrier off-by-one: bar `i+max_candles` is checked for neither TP nor SL yet is used as the exit.
+  Affects ~0.8% of labels. Deliberately not changed.
+- Outlier threshold is timeframe-blind — 58.4% of 1w bars flagged. Treat 1d/1w outlier flags as absent.
+- `config.yaml`'s `backtesting:` section has no reader since Stage 0.
+- `WalkForwardTrainer` still drives the superseded `WalkForwardSplitter`.
+- FRED publication lag is not modelled.
+
+## Where to read next
+
+| topic | entry |
+|---|---|
+| What was deleted and why | Stage 0 Teardown; Stage 0 Completion Review |
+| Label metadata, overlap, duration distribution | Stage A.1 |
+| Uniqueness, n_eff = 14.4% of nominal | Stage A.2 |
+| Purged K-Fold, the leakage test | Stage A.3 |
+| Harness single-book fix | Stage A.4 |
+| Trial registry, DSR, the 2,024 lower bound | Stage A.5 |
+| **Corrected ceiling table, S5 result** | **Stage A.6** |
+| Data coverage and shortfalls | Stage B.1 |
+
+---
+
+# HISTORICAL LOG (oldest first)
+
+**Everything below predates the current architecture.** Entries before the 2026-08-14 Stage 0 teardown
+describe components that have since been deleted; they are retained as the record of how the findings in
+MASTER_CONTEXT_v2 §2 were arrived at, not as a description of the codebase.
 
 ## Completed
 - Initialised project skeleton matching the exact folder structure specified in `MASTER_CONTEXT.md`.
@@ -2267,3 +2370,1561 @@ computed with the bug. Since the bug accounted for 96% of the loss in the audite
 answer the question they were launched for. That run was **killed and relaunched** against the corrected cost
 model. Results from before this entry (`reports/layer_ablation.json`) are superseded for anything involving
 drawdown, profit factor, or equity — the per-layer attribution logic they exercised is unaffected.
+
+
+## Session Update: 5-Fold Ablation Re-Run Against the Corrected Cost Model (2026-08-14)
+
+Re-ran the full 5-fold layer ablation after the gap-cost fix. **Scope unchanged: Layers 5/6/7C, not 3-9** — Layers
+3 (no macro data), 4 (no 1D/1W timeframes) and 9 (needs Layers 10/11) still cannot be wired. Evaluated exclusively
+against **Layer 14 research criteria; Tier 1 is not computed anywhere in this codebase.**
+Results: `reports/layer_ablation_v2.json`.
+
+### The gap-cost fix eliminated the negative equity entirely
+
+| variant | maxDD before fix | maxDD after fix | L14 maxDD verdict |
+|---|---|---|---|
+| baseline_phase1 | 0.056 | **0.030** | pass (was pass) |
+| all_layers | **1.023** | **0.073** | **pass** (was fail) |
+| no_liquidity_trap_L5 | **1.023** | **0.073** | **pass** (was fail) |
+| no_volatility_gate_L6 | **1.235** | **0.083** | **pass** (was fail) |
+| no_ensemble_L7C | 0.056 | 0.030 | pass (was pass) |
+
+No variant destroys the account, nothing is disqualified, and `layer14_oos_max_drawdown` now **passes for all
+five** (previously three failed). This confirms the audit's conclusion directly: the double-counted, per-bar,
+symmetric gap charge WAS the cause of negative equity — not the layers.
+
+Baseline sanity check: trade count is **identical** (3,502) before and after the fix, confirming the correction
+touched only cost accounting and not signal generation. The baseline itself improved from Sharpe -12.974 / PF
+0.236 to **-7.864 / PF 0.426**.
+
+### Results
+
+| variant | OOS Sharpe (as reported) | OOS Sharpe (common folds) | PF | maxDD | trades |
+|---|---|---|---|---|---|
+| baseline_phase1 | -7.864 | -10.802 | 0.426 | 0.030 | 3502 |
+| all_layers | -15.708 | -15.708 | 0.282 | 0.073 | 2817 |
+| no_liquidity_trap_L5 | -15.708 | -15.708 | 0.282 | 0.073 | 2817 |
+| no_volatility_gate_L6 | -20.250 | -20.250 | 0.205 | 0.083 | 2813 |
+| no_ensemble_L7C | -7.432 | -10.077 | 0.429 | 0.030 | 3499 |
+
+**FLAGGED: Layer 7C ensemble** — profit factor 0.429 -> 0.282, max drawdown 0.030 -> 0.073, and lower Sharpe.
+
+### A methodological flaw the under-powered-fold exclusion introduced
+
+The "as reported" and "common folds" columns differ because **the exclusion averages different variants over
+different fold sets**, making the headline numbers non-comparable. The Phase 2 variants lose folds 3 and 4 (46 and
+12 trades) while baseline keeps all five — and for those variants folds 3/4 were their BEST folds (+0.50, -0.41),
+so excluding them removes their most favourable results while baseline keeps its own mild folds (-3.04, -3.87).
+
+Restricting every variant to the folds that are well-powered in ALL variants (0, 1, 2):
+
+```
+Full stack vs baseline, like-for-like:  -4.906 Sharpe  (-10.802 -> -15.708)
+as-reported comparison overstated this: -7.845
+```
+
+The degradation is real and in the same direction, but the as-reported figure **overstates it by 60%**. The
+exclusion fix (correctly) stopped noise folds corrupting a single run's mean, but cross-variant comparison needs a
+common fold set. **This is a real follow-up: `_format_comparison` should compare on common well-powered folds, not
+on each variant's own subset.** PF and maxDD are unaffected — pooled PF is sample-weighted and maxDD is a max, so
+neither depends on which folds entered a mean.
+
+### Per-layer verdicts
+
+**Layer 7C (Ensemble) — DEGRADES, and this is the robust finding.** It is the only difference between
+`no_ensemble_L7C` (PF 0.429, maxDD 0.030 — indistinguishable from baseline) and `all_layers` (PF 0.282, maxDD
+0.073). Crucially the verdict rests on **profit factor and max drawdown**, which are immune to the fold-set
+artifact above, so it does not depend on the Sharpe comparison at all. Mechanism unchanged from the previous run:
+the ensemble weights `component_b` at ~0.94, discarding the Phase 1 agreement rule that was acting as a filter.
+
+**Layer 5 (Liquidity Trap) — exact no-op, now confirmed twice under different conditions.** `all_layers` and
+`no_liquidity_trap_L5` are byte-identical again (same Sharpe to 3dp, same PF, same maxDD, same 2,817 trades), so
+the ensemble is again assigning it weight ~0. This held BOTH at the old 44.1% sweep rate AND after the re-tune to
+11.5% — a 4x selectivity improvement changed nothing.
+
+Combined with the bearish/bullish split staying ~1.0 at every threshold measured (197/182 -> 53/46 -> 24/21),
+**the earlier "mistuned, not architecturally flawed" reading should be revised toward the architectural side**:
+re-tuning improved the detector's specificity without giving it directional content. Do not re-include Layer 5 on
+the assumption that further tuning will help.
+
+**Layer 6 (Volatility Gate) — the reported "+4.542 Sharpe, helps" is NOT trustworthy.** It differs from
+`all_layers` by **4 trades** (2,817 vs 2,813) yet swings fold-1 Sharpe from -18.81 to -29.20 on a ONE-trade
+difference (1,076 vs 1,075). That is not a layer effect; it is Sharpe instability. With ~2% position sizes the
+equity curve is mostly flat with occasional small steps, so the returns series has a very small standard
+deviation and Sharpe is numerically fragile — this is a *different* fragility from the destroyed-equity case
+already guarded against, and it survives even with a healthy drawdown. The gate touches 61 of 35,069 bars
+(0.174%). **Verdict: still untested, not "helpful".**
+
+### Layer 14 status (research phase — NOT the Tier 1 live gate)
+
+| criterion | baseline | all_layers | no_L5 | no_L6 | no_L7C |
+|---|---|---|---|---|---|
+| oos_sharpe | fail | fail | fail | fail | fail |
+| oos_profit_factor | fail | fail | fail | fail | fail |
+| oos_max_drawdown | **pass** | **pass** | **pass** | **pass** | **pass** |
+| risk_on_regime_vs_aggregate | not_evaluated | not_evaluated | not_evaluated | not_evaluated | not_evaluated |
+| ensemble_weight_stability | not_evaluated | pass | pass | pass | not_evaluated |
+
+Every variant still fails OOS Sharpe (best: -7.43 against a 0.5 threshold) and profit factor (best: 0.429 against
+1.2). **Fixing the accounting bug did not rescue the strategy** — it was inflating how bad the result looked, not
+creating it. The Layer 14 kill-criterion determination recorded earlier stands unchanged: this is a
+hypothesis-revision trigger, not a tuning problem.
+
+`risk_on_regime_vs_aggregate` remains structurally uncomputable without Layer 3, so under the user's
+all-five-must-evaluate bar, **Phase 1E still cannot be assessed**.
+
+### Next Steps
+
+1. **Make cross-variant Sharpe comparison use a common well-powered fold set** (see the methodological flaw
+   above) — currently each variant is averaged over its own subset.
+2. **Do not keep Layer 7C in this form** — it is the flagged degrader on PF and maxDD, metrics that do not depend
+   on the fold-set artifact.
+3. **Treat Layer 5 as architecturally unproven, not mistuned** — two independent confirmations of zero
+   contribution at very different selectivity levels.
+4. **Layer 6 remains unfalsifiable on this dataset** at 0.174% of bars; it needs data where it actually fires.
+5. **MASTER_CONTEXT constraint 6 is still unimplemented** — no execution-layer risk caps exist. The gap-cost fix
+   removed the mechanism that drove equity negative; it did not add the safety layer that should have made
+   negative equity unreachable regardless.
+6. Sharpe is numerically fragile at these position sizes even with healthy drawdowns (see the Layer 6 finding).
+   Consider reporting trade-level EV/PF as the primary comparison metric and treating Sharpe as secondary until
+   position sizing is real (Layer 10).
+
+
+## Session Update: Signal-Ceiling Re-Measurement — the Label Is Barrier Geometry (2026-08-14)
+
+Re-measured the predictive ceiling of the current 39-feature set on the full ~9-year real BTC/USDT 1h dataset
+(78,378 rows), reproducing the Stage 4 methodology so numbers are directly comparable, and extending it two ways:
+conditioned on Layer 6 volatility state, and across four triple-barrier geometries. Tool:
+`scripts/measure_signal_ceiling.py` (kept). **This entry supersedes Stage 4's interpretation.**
+
+### Updated AUC (unchanged from Stage 4, as expected)
+
+| measure | value |
+|---|---|
+| Best univariate feature (`mom_di_spread`) | **AUC 0.5172** |
+| Median \|AUC-0.5\| across all 39 features | **0.0024** |
+| Multivariate ceiling, all bars, generous LightGBM | **AUC 0.5251**, 95% CI [0.514, 0.536] |
+
+Identical to Stage 4 (0.5172 / 0.0024 / 0.5289) — expected, since the only feature change since then was
+`vol_spike` on 17 of 78,381 rows.
+
+### THE CENTRAL FINDING: the label is ~pure barrier geometry, not market structure
+
+For a driftless random walk, the probability of touching +tp before -sl is exactly `sl / (tp + sl)`. Relabelling
+the same 9 years of real BTC at four geometries:
+
+| geometry | observed up rate | driftless-walk prediction | gap | test AUC | boost rounds |
+|---|---|---|---|---|---|
+| tp=2.0 / sl=1.0 (current) | 0.337 | 0.333 | +0.004 | 0.5211 | 11 |
+| tp=1.0 / sl=1.0 (symmetric) | 0.507 | 0.500 | +0.007 | **0.5094** | 3 |
+| tp=1.0 / sl=2.0 (inverted) | 0.675 | 0.667 | +0.008 | 0.5079 | 11 |
+| tp=3.0 / sl=1.0 | 0.261 | 0.250 | +0.011 | 0.5136 | 7 |
+
+**Nine years of real BTC produces a label distribution within 0.4-1.1 percentage points of a driftless random
+walk at every geometry tested.** The class balance the models have been fighting all project is not a property of
+the market — it is arithmetic. The residual +0.4 to +1.1pp is BTC's genuine upward drift: real, and tiny.
+
+**Corollary, and the reason this matters more than the AUC number itself:** at SYMMETRIC barriers, where there is
+no class imbalance to exploit, AUC collapses to **0.5094** and early stopping halts after **3 rounds**. Much of
+the apparent 0.5251 on asymmetric barriers is therefore the model learning the *base rate*, not direction. The
+genuine directional signal in this feature set is close to 0.509 — i.e. essentially nil.
+
+### Signal DOES concentrate in compression (the Layer 6 result)
+
+Multivariate ceiling, same features, conditioned on `vol_atr_pct_rank`:
+
+| subset | n | test AUC | 95% CI | logloss vs base | rounds |
+|---|---|---|---|---|---|
+| ALL bars (unconditioned) | 78,226 | 0.5251 | [0.514, 0.536] | +0.00102 | 7 |
+| Compressed, ATR pct < 0.30 (Layer 6 table) | 27,780 | 0.5238 | [0.506, 0.542] | -0.00082 | 32 |
+| **Compressed, ATR pct <= 0.20 (hypothesis text)** | 20,198 | **0.5390** | **[0.519, 0.559]** | **+0.00170** | 5 |
+| Expanding, 0.30-0.70 | 27,757 | 0.5140 | [0.494, 0.533] | +0.00030 | 2 |
+| Extended, ATR pct > 0.70 | 22,689 | 0.5101 | [0.488, 0.532] | +0.00027 | 4 |
+
+Read carefully, because the honest claim is narrower than it first looks:
+
+- **Expanding and Extended have CIs that straddle 0.5** -> no detectable signal in either.
+- **Compressed (<=0.20) has a CI entirely above 0.5** ([0.519, 0.559]) and the largest logloss improvement over
+  baseline. Something is there.
+- **BUT** that CI overlaps heavily with the unconditioned CI [0.514, 0.536], so "compression is significantly
+  better than unconditioned" is NOT established. The defensible statement is: *signal is present in compression
+  and absent in expansion/extension*, which is a gradient consistent with the hypothesis, not proof of it.
+- The stricter 0.20 threshold from the Adaptive doc's hypothesis section beats Layer 6's own 0.30 table threshold
+  (0.5390 vs 0.5238), and 0.30 is the only subset whose logloss is WORSE than baseline.
+
+This is the empirical basis for treating Layer 6 as the next priority: compression is condition 1 of the
+four-condition hypothesis, it is the ONLY one computable from data this project ingests, and it is the only
+volatility state where the ceiling is measurably above chance.
+
+### Why the models behave as they do
+
+- **Early stopping halts after 2-32 rounds** in every configuration. A model finding real structure trains for
+  hundreds. Halting almost immediately is the clearest single indicator that there is nothing to fit.
+- **`vol_state_compressed` is currently one of 39 undifferentiated input features, never a filter.** The model is
+  asked to predict every candle in 9 years, so a signal confined to ~26% of bars is diluted by the 74% where the
+  measurement above shows there is none.
+- **Percentile-ranking over a trailing 252 bars destroys absolute level information** (`feature_calculator`'s
+  "no raw values leave this module" rule). Every feature is a within-window rank, so the model cannot see regime
+  magnitude, only relative position.
+
+### Next Steps
+
+1. **Rebuild around compression as a FILTER, not a feature** — train and evaluate only on candles where
+   `vol_atr_pct_rank <= 0.20`. This is the one conditioning step available today and the only subset with a
+   ceiling measurably above chance.
+2. **Reconsider the triple-barrier label.** It is currently ~pure geometry. Any label whose class balance is
+   predicted to within 1pp by `sl/(tp+sl)` is measuring the barrier, not the market. Consider fixed-horizon
+   returns, or barriers scaled to a compression-conditional volatility estimate rather than trailing ATR.
+3. **Improve Layer 6 itself** (see the dedicated next entry / discussion): duration and slope of compression, not
+   just a point-in-time percentile; reconcile the 0.20 vs 0.30 thresholds; fix Spike, which fires on 0.174% of
+   bars and is currently unfalsifiable.
+4. Everything previously recorded stands: Layer 7C degrades and is flagged, Layer 5 contributes exactly nothing
+   at two very different selectivity settings, constraint 6 is unimplemented.
+
+## Session Update: Stage 0 Teardown (2026-08-14)
+
+**First session executed under BUILD_PLAN_v2 / MASTER_CONTEXT_v2.** This is Stage 0 (Teardown), gating on
+Gate 0. No measurement was produced this session and none was intended: Stage 0 is deletion, and the deliverable
+is a smaller repo plus a green suite, not a number. Nothing was committed.
+
+### Test suite count
+
+| point | tests |
+|---|---|
+| Before teardown | **413 passed** |
+| After teardown | **262 passed** |
+| Net | **-151** |
+
+(Both figures exclude `tests/test_binance_real_data.py`, which requires live network access. Zero failures at
+both points. MASTER_CONTEXT_v2 section 8 records "384 passing"; the real pre-teardown number was 413.)
+
+Net diff: **24 files changed, 295 insertions, 6,973 deletions.**
+
+### Deleted outright (13 files)
+
+Per MASTER_CONTEXT_v2 section 8, on operator instruction:
+
+| file | lines | why |
+|---|---|---|
+| `src/predictive_core/analog_engine.py` | 429 | Component A / k-NN. Distance metric weighted by Component B importances, inherits its uselessness |
+| `src/predictive_core/ensemble.py` | 961 | `EnsembleMetaModel`, `fit_ensemble_weights` (S7; destroyed the account in ablation) |
+| `src/predictive_core/explainability.py` | 832 | Layer 8. Orphan: `EnsembleSignalSet` was its only input type |
+| `src/backtesting/phase2_strategy.py` | 475 | Orphan: 100% consumer of A + B-direction + 7C |
+| `src/backtesting/predictive_core_strategy.py` | 385 | Orphan: same |
+| `scripts/run_layer_ablation.py` | 414 | Orphan: drove `Phase2Strategy` |
+| `scripts/run_walkforward_backtest.py` | 270 | Orphan: drove `PredictiveCoreStrategy` |
+| `scripts/diagnose_negative_equity.py` | 98 | Orphan: drove `Phase2Strategy` |
+| `tests/test_ensemble.py` | 799 | Covered deleted component only |
+| `tests/test_explainability.py` | 764 | Covered deleted component only |
+| `tests/test_layer_ablation.py` | 374 | Covered deleted component only |
+| `tests/test_phase2_strategy.py` | 298 | Covered deleted component only |
+| `tests/test_predictive_core_strategy.py` | 116 | Covered deleted component only |
+
+### Cut surgically
+
+- **`src/predictive_core/boosted_core.py` (439 -> 240 lines).** Removed `train_direction_classifier`,
+  `_direction_objective`, `_direction_to_class_idx`, `DirectionFoldResult`, `DIRECTION_CLASS_LABELS`, the
+  `IsotonicRegression` calibration block and its `calibrators_` attachment, and `_compute_class_weights` (the
+  balanced class-weighting machinery built for the 65/34 imbalance, S1). `FoldResult` lost its `.direction`
+  field; `WalkForwardTrainer` no longer trains a classifier.
+- **Retained in the same file:** `train_quantile_regressor`, `_quantile_objective`, `QuantileFoldResult`,
+  `QUANTILES`, and the Optuna infrastructure. Section 8 names "Component B **direction classifier**"
+  specifically, and section 8's KEEP list retains Optuna infrastructure. The magnitude/duration quantile heads
+  were not named and were not deleted -- but they now have **no caller in `src/`**, since both strategy adapters
+  are gone.
+
+### Two judgment calls made explicitly, both retentions, both reversible
+
+Section 8's DELETE list includes "calibration work premised on that imbalance." That phrase is ambiguous across
+two different things, and they were treated differently:
+
+1. **`calibration.py` (ECE / Brier) -- RETAINED.** ECE and Brier are geometry-independent measurements of any
+   probabilistic classifier; they are not premised on any class balance. The imbalance-premised artefact was the
+   *isotonic calibrator fit to the 65/34 three-class problem*, which was deleted with the classifier.
+   MASTER_CONTEXT_v2 section 1 ranks measurement apparatus above models, and BUILD_PLAN_v2 D.3 requires
+   "calibration on the event set" for the Stage D meta-label model.
+2. **`skill_diagnostics.py` -- RETAINED.** These are the diagnostics that *measured* the direction classifier as
+   skill-less (0.004-0.016), i.e. they produced the number that killed their own caller. BUILD_PLAN_v2 Stage C
+   requires "logloss vs baseline" for all three ceiling-test arms.
+
+Both now have **no caller in `src/`**. Both carry a `STAGE 0 STATUS` docstring block recording that, so an
+unused module is not mistaken for a live one. If the operator disagrees, deleting them is a two-file change.
+
+### Callers found by the Gate 0 grep sweep, and what was done with each
+
+Every reference to a deleted symbol, and its disposition. **`src/` is now completely clean -- the sweep returns
+zero matches.**
+
+| caller | reference | disposition |
+|---|---|---|
+| `src/predictive_core/__init__.py` | exported A, B-direction, calibration symbols | Rewritten; exports reduced to labelling, splitter, calibration, quantile regressor |
+| `src/predictive_core/dataset.py` | 5 docstring refs to A / `PredictiveCoreStrategy` | Docstrings rewritten to name surviving consumers |
+| `src/predictive_core/labeling.py` | `attrs['label_horizon']` rationale cited `PredictiveCoreStrategy` | Rewritten; contract retained and re-pointed at Stage A.3, which needs real per-sample `t1` |
+| `src/predictive_core/skill_diagnostics.py` | argmax rule cited `PredictiveCoreStrategy` | Generalised to "a consuming strategy" |
+| `src/risk_sizing_selection/risk_engine.py` | prereqs cited `analog_engine`; pattern cited `explainability.py` | Rewritten; added a Stage 0 caveat that Layer 9 now has no live caller until Stage E |
+| `src/macro_mtf_liquidity_vol/macro_regime.py` | 3 illustrative refs to `HistoricalAnalogEngine` | Names removed, points preserved |
+| `tests/test_macro_regime.py` | tz-bug regression test cited A by name | Reworded to "the since-deleted k-NN analog engine" |
+| `src/backtesting/__init__.py` | none | Untouched -- never imported the strategies |
+| `tests/test_backtesting.py` | 18 apparent hits | **Untouched.** All are the generic `SignalStrategy.ensemble_weights()` protocol and the Layer 14 stability criterion, driven by in-file fake strategies. No dependency on `EnsembleMetaModel`. Verified before concluding, not assumed |
+
+**One intentional exception to "zero references":** `tests/test_predictive_core.py` names six deleted tests in
+its header, as the record of what Stage 0 pruned and why. That is a deletion manifest, not a dependency. Flagged
+for the operator rather than quietly scrubbed.
+
+### Pruned rather than deleted
+
+`tests/test_predictive_core.py` (458 -> 90 lines). Deleted: `test_minimum_sample_gate_enforced`,
+`test_deduplication_is_asset_aware_and_uses_real_time`, `test_predict_accepts_tz_aware_query_timestamp`,
+`test_deduplicate_matches_naive_reference_and_is_fast` and its `_naive_deduplicate_reference` helper (all
+Component A), both class-weight tests, and the `main()` narrative script. Retained: splitter fold-isolation,
+`apply_triple_barrier` label-horizon metadata. Rewritten:
+`test_walk_forward_trainer_runs_end_to_end_with_calibration` -> `..._runs_quantile_regressors_end_to_end`, with
+the isotonic-calibration assertions removed and pinball-loss assertions kept.
+
+### Gate 0 status: NOT CLEAR -- 3 of 5 tasks done
+
+| task | status |
+|---|---|
+| 0.1 Delete A, B-direction, `EnsembleMetaModel`, `fit_ensemble_weights` | **DONE** -- grep clean in `src/` |
+| 0.2 Delete class-weighting machinery and imbalance-premised calibration | **DONE** -- see judgment calls above |
+| 0.3 Remove `Phase2Strategy.max_position`; leave a hard `NotImplementedError` stub where real caps go | **NOT DONE** |
+| 0.4 Update Layer 6 threshold 0.30 -> 0.20, single-sourced | **NOT DONE** |
+| 0.5 Prune tests; record count before/after | **DONE** -- 413 -> 262 |
+
+0.3 and 0.4 were **not attempted** because the operator's instruction this session scoped the work to section
+8's DELETE list. They are not blocked -- both are small and understood:
+
+- **0.3.** `Phase2Strategy.max_position` no longer exists (the class was deleted), so the first half is
+  satisfied incidentally. The second half is not: **there is nowhere in the repo that the `NotImplementedError`
+  stub belongs.** `risk_engine.py` is a *scorer* -- it accepts `position_size_pct` as an input and never produces
+  one. There is now **no sizing arithmetic anywhere in the codebase.** Satisfying 0.3's acceptance ("tests fail
+  loudly if anything sizes without caps") requires creating a new module, which is a build decision, not a
+  teardown one.
+- **0.4.** `COMPRESSED_MAX_PERCENTILE = 0.30` at `src/macro_mtf_liquidity_vol/volatility_classifier.py:111`,
+  already single-sourced. A one-line change plus a duplicate sweep of `config.yaml`. S6 settled that 0.20 is
+  correct.
+
+### Also unresolved, and on the critical path
+
+**`trials.jsonl` does not exist anywhere in the repo.** MASTER_CONTEXT_v2 section 6 requires every evaluated
+configuration to be logged there, and DSR -- a Stage E gate -- cannot be computed honestly without it. Zero
+model configurations were evaluated this session (teardown produces no measurements), so nothing was owed to it
+today, but the file's absence means **every configuration evaluated before this point is unlogged and
+unrecoverable**, and the trial count feeding any future DSR will understate reality. Creating it is Stage A.5,
+which defines its schema; it was deliberately not created ahead of that.
+
+### What the repo is now
+
+Layers 1 (data), 2 (features), 3 (macro regime), 4 (MTF), 5 (liquidity trap), 6 (volatility), 9 (risk scoring),
+and 14 (backtest harness) survive. The predictive core is now labelling + splitting + dataset assembly +
+quantile regression + two unreferenced measurement modules. **There is no strategy in the repo.** Nothing can
+currently generate a position, by design -- Stage D builds the primary rule and the meta-label model, and Stage
+E builds the risk caps and exits beneath it.
+
+### Next Steps
+
+1. **Operator decision on Gate 0's remaining two tasks** (0.3's stub location, 0.4's one-line threshold change).
+   Gate 0 is not self-certifiable by the agent (section 10).
+2. Then **Stage A -- Measurement Apparatus**, the highest-priority work in the project: A.1 label metadata
+   (`t0`/`t1`/`barrier_touched`/`realised_return`), A.2 uniqueness weighting, A.3 Purged K-Fold + embargo
+   replacing `WalkForwardSplitter`, A.4 the four harness defect fixes (S11/S12/I3), A.5 `trials.jsonl` + DSR,
+   A.6 recompute the Stage 5 ceiling under the corrected apparatus.
+3. **Stage B data acquisition should start in parallel now** -- BUILD_PLAN_v2's sequencing rationale puts it on
+   Day 1 because vendor lead time is the longest pole. Nothing in Stage 0 or A blocks it.
+
+
+## Session Update: Stage 0 Tasks 0.3 and 0.4 -- GATE 0 CLEAR (2026-08-14)
+
+Completes the two tasks left outstanding by the teardown entry above. Suite: **262 -> 270 passed**, zero
+failures. Nothing committed.
+
+### 0.3 -- Execution-layer risk cap stub
+
+`Phase2Strategy.max_position` was already gone (the class was deleted in the teardown), so the removal half was
+satisfied incidentally. The stub half required a new home, because **there is no sizing arithmetic anywhere in
+the repo** and `risk_engine.py` is a scorer that consumes `position_size_pct` rather than producing one.
+
+Created **`src/risk_sizing_selection/position_sizing.py`** -- Layer 10, every entry point raising
+`ExecutionRiskCapsNotImplemented(NotImplementedError)`:
+
+- `calculate_position_size()` -- the only sanctioned path from signal to size. Raises.
+- `apply_execution_risk_caps()` -- would clamp to 2/6/10%. Raises.
+- `SINGLE_TRADE_RISK_CAP_PCT = 2.0`, `CORRELATED_DIRECTION_RISK_CAP_PCT = 6.0`,
+  `AGGREGATE_OPEN_RISK_CAP_PCT = 10.0` -- declared in the module that will enforce them, rather than existing
+  only inside a scoring formula that cannot. Currently declarations, not controls.
+
+The module docstring records why `max_position` was never a risk cap, in the two independent senses: it capped
+SIZE not RISK (risk = size x stop distance, and there are still no stops -- Layer 13/Stage E.2), and it sat in
+the MODEL layer where a model output could route around it.
+
+Created **`tests/test_position_sizing.py`** (7 tests), asserting a refusal rather than a behaviour:
+
+- both entry points raise, including when called with plausible guessed signatures (the raise cannot be routed
+  around by passing arguments that look real);
+- the exception remains a `NotImplementedError` subclass so generic handlers still catch it;
+- the message names S10 and all three cap figures, so a traceback says WHY sizing refused rather than merely
+  that something is unfinished;
+- the cap constants equal MASTER_CONTEXT's exact figures;
+- a reflective test enumerates `__all__` and asserts EVERY public callable refuses -- so adding a working sizing
+  function without also implementing caps fails here.
+
+**These tests are expected to fail when Stage E.1 lands.** That is intended: at that moment they should be
+replaced by E.1's acceptance test (a malicious model output demanding 50% size comes back clamped), not quietly
+deleted to keep a suite green. The test module says so in its own docstring.
+
+### 0.4 -- Layer 6 compression threshold 0.30 -> 0.20 (S6)
+
+**The constant WAS duplicated. Two separate duplications were found, both in `features/feature_calculator.py`:**
+
+| duplication | detail |
+|---|---|
+| Band edges | `feature_calculator.py:290-294` hardcoded `0.3` and `0.7` in three independent boolean masks, entirely unaware of Layer 6's `COMPRESSED_MAX_PERCENTILE`/`EXTENDED_MIN_PERCENTILE` |
+| Spike constants | `feature_calculator.py:34-35` re-declared its own `SPIKE_LOOKBACK_CANDLES = 5` / `SPIKE_RATIO_THRESHOLD = 2.0` -- under a comment claiming they were "kept as named constants so `vol_spike` and the Layer 6 classifier reference the same numbers", which was true only by coincidence of both literals happening to match |
+
+This mattered more than a tidiness issue. Layer 6's `classify_volatility_state` assigns Expanding via a final
+`else`, so moving its compression edge is self-consistent by construction. But `feature_calculator` builds three
+*independent* masks, so changing only its compressed edge would have left every bar in [0.20, 0.30) belonging to
+**no state at all** -- a silent hole in a model input column, not a visible error.
+
+Resolution: `volatility_classifier.py` is now the declared single source; `feature_calculator.py` imports all
+four constants and declares none. No cycle -- `volatility_classifier` imports only `math`/`dataclasses`/`typing`.
+
+The comparison stays strict (`<`), not `<=` as the hypothesis text writes it. Verified rather than argued (see
+below): exactly 0.20 never occurs.
+
+### Verification against real data (not asserted -- measured)
+
+Ran the changed pipeline over the cached 9-year real BTC/USDT 1h frame (78,666 raw rows, 78,381 with a defined
+`vol_atr_pct_rank`):
+
+| check | result |
+|---|---|
+| `vol_state_compressed` now fires on | **20,201 rows** (was 27,791 at <0.30) |
+| Band [0.20, 0.30) moved out of Compressed | **7,590 rows = 9.7% of the dataset** |
+| Agreement with hypothesis-text `<= 0.20` | 20,201 -- **identical** |
+| Partition integrity across all 78,381 rows | **every row in exactly one state**; states-per-row counts `{1: 78381}`. No gap opened |
+| Rows where `vol_atr_pct_rank == 0.20` exactly | **0** -- `rank(pct=True)` over 252 bars yields k/252 for integer-or-half-integer k, and 0.20 would need k=50.4. The `<` vs `<=` distinction is empirically empty on this data |
+
+The 20,201 / 27,791 figures reconcile with the previously recorded 20,198 / 27,780; the small difference is the
+denominator (78,381 feature rows here vs 78,226 modeling rows after labelling and neutral-class exclusion).
+
+**This is a state change for ~10% of all bars in a column that feeds every model.** Any measurement taken before
+this change that used `vol_state_compressed` or Layer 6's state is not directly comparable to one taken after.
+
+### Gate 0 status: CLEAR -- all 5 tasks done
+
+| task | status |
+|---|---|
+| 0.1 Delete Component A, B-direction, `EnsembleMetaModel`, `fit_ensemble_weights` | **DONE** -- `src/` grep-clean |
+| 0.2 Delete class-weighting machinery and imbalance-premised calibration | **DONE** |
+| 0.3 Remove `max_position` as a risk mechanism; hard `NotImplementedError` stub | **DONE** |
+| 0.4 Layer 6 threshold 0.30 -> 0.20, single-sourced | **DONE** -- two duplications found and collapsed |
+| 0.5 Prune tests; record count before/after | **DONE** -- 413 -> 262 -> 270 |
+
+Gate 0's acceptance conditions: test suite green (**270 passed, 0 failed**); repo contains no reference to
+deleted components (`src/` returns zero matches; the one intentional exception is the deletion manifest in
+`tests/test_predictive_core.py`'s header, flagged rather than scrubbed); counts recorded here.
+
+**Gate 0 is not self-certified by the agent (MASTER_CONTEXT_v2 section 10). It requires operator sign-off before
+Stage A begins.**
+
+### Carried forward unchanged
+
+- **`trials.jsonl` still does not exist.** Zero model configurations were evaluated across either Stage 0
+  session. Creation is Stage A.5, which defines its schema.
+- `calibration.py` and `skill_diagnostics.py` remain retained-but-uncalled, each carrying a `STAGE 0 STATUS`
+  docstring. So does `train_quantile_regressor`.
+- Nothing in the repo can generate a position. By design until Stage D.
+
+### Next Steps
+
+1. **Operator sign-off on Gate 0.**
+2. **Stage A -- Measurement Apparatus** (A.1 label metadata `t0`/`t1`/`barrier_touched`/`realised_return`, A.2
+   uniqueness weighting, A.3 Purged K-Fold + embargo, A.4 the S11/S12/I3 harness fixes, A.5 `trials.jsonl` +
+   DSR, A.6 recompute the ceiling under corrected apparatus). Expect A.6 to widen the compressed-regime CI
+   substantially -- BUILD_PLAN_v2 A.6 states in advance that `[0.519, 0.559]` straddling 0.5 is a likely and
+   honest outcome, not a failure.
+3. **Stage B data acquisition in parallel, starting now** -- vendor lead time is the longest pole and nothing in
+   Stage 0 or A blocks it.
+
+
+## Session Update: Stage 0 Completion Review -- 2 Stale-Doc Defects Found and Fixed (2026-08-14)
+
+Audit of the Stage 0 work above against BUILD_PLAN_v2's task table and MASTER_CONTEXT_v2 section 8, re-deriving
+each acceptance condition from the source documents rather than from the preceding entries. Suite **270 passed**,
+unchanged. Nothing committed.
+
+### Two real defects found -- both stale documentation asserting the superseded threshold
+
+The code change for 0.4 was correct, but two places still *stated* 0.30, which is the exact divergence class that
+task 0.4 exists to eliminate:
+
+1. **`volatility_classifier.py` header docstring (lines 2-11)** -- the module's own "MASTER_CONTEXT's exact
+   table" still read `Compressed: ATR < 30th percentile` and `Expanding: 30th-70th percentile`. The authoritative
+   prose description of Layer 6 contradicted the constant defined 120 lines below it. Rewritten to state 0.20,
+   the 0.20-0.70 Expanding band, and why (S6), with an explicit note that the rest of the table is unchanged.
+2. **`scripts/measure_signal_ceiling.py:124`** -- labelled the `< 0.30` arm "Layer 6 table", which now points at
+   a value Layer 6 does not use. Relabelled: 0.20 is "LIVE Layer 6", 0.30 is "SUPERSEDED value". Added the
+   previously-missing `0.20 <= pct <= 0.70` Expanding arm, so the live band is actually measurable (only the old
+   0.30-0.70 band was).
+
+   The thresholds themselves were deliberately left hardcoded rather than imported from Layer 6, with a comment
+   recording why: this is a measurement tool, and importing the constant would silently redefine "Compressed"
+   every time Layer 6 is retuned, making future runs incomparable with the numbers already recorded in this file.
+
+### Verified independently (not restated from the entries above)
+
+| check | method | result |
+|---|---|---|
+| Deleted modules genuinely gone | `importlib.import_module` on all 5 | all raise `ModuleNotFoundError` |
+| No symbol leaks via package re-export | `hasattr` on `src.predictive_core` for 5 deleted names | all absent |
+| Layer 6 constant truly single-sourced | identity check across modules | `volatility_classifier.COMPRESSED_MAX_PERCENTILE is feature_calculator.COMPRESSED_MAX_PERCENTILE` -> `True`, value `0.2` |
+| No deleted-component refs in code/config | grep over `*.py,*.yaml,*.yml,*.toml,*.cfg,*.ini` | zero. All remaining hits are in `docs/project_state.md` (historical log) and `architecture/` (the specs that ordered the deletion) |
+| `config.yaml` clean | full read | no compression threshold, no analog/ensemble model config. The two `ensemble_instability_*` keys are Layer 14 kill-criteria config for the RETAINED harness, not `EnsembleMetaModel` |
+| No stray band literals | grep for `0.3`/`0.7`/`0.2` across `src/` | remaining hits are unrelated constants: Layer 3's `CORRELATION_REDUCED_WEIGHT_THRESHOLD`/`DEFAULT_RISK_OFF_CORRELATION_THRESHOLD`, the ensemble-weight-delta kill threshold, and an Optuna learning-rate bound |
+| Suite green | full run | **270 passed, 0 failed** |
+
+### Confirmed in scope, and correctly NOT done at Stage 0
+
+Section 8's FIX table contains six entries; only ONE belongs to Stage 0. Checked so that "the FIX table isn't
+done" is not mistaken for incomplete teardown:
+
+| FIX entry | belongs to | status |
+|---|---|---|
+| Layer 6 threshold 0.30 -> 0.20 | **Stage 0.4** | **DONE** |
+| `equity_curve_from_trade_pnls` bankruptcy floor (S11) | Stage A.4 | correctly not started |
+| Harness two-book accounting (S12) | Stage A.4 | correctly not started |
+| Gap cost model cap (S11) | Stage A.4 | correctly not started |
+| Ablation flagging maxDD/PF before Sharpe (I3) | Stage A.4 | correctly not started |
+| `DEFAULT_LEVEL_TOLERANCE_ATR` 0.25 retune (S8) | Stage B.4 | correctly not started |
+
+### Gate 0: CLEAR (re-confirmed after fixes)
+
+All five tasks done; both Gate 0 acceptance conditions hold (suite green; no reference to deleted components in
+code or config, recorded here). Test count across the whole of Stage 0: **413 -> 262 -> 270**.
+
+Still requires operator sign-off -- Gate 0 is not self-certified by the agent (section 10).
+
+### Carried forward, unchanged
+
+- **`trials.jsonl` still does not exist.** Zero model configurations evaluated in any Stage 0 session. Stage A.5.
+- `calibration.py`, `skill_diagnostics.py`, `train_quantile_regressor` retained but uncalled, each flagged in its
+  own docstring.
+- **`config.yaml`'s entire `backtesting:` section is now unread** -- its only consumer was the deleted
+  `run_walkforward_backtest.py`. Not a Stage 0 defect (nothing in section 8 names it), but it is dead config that
+  Stage A.4 should re-wire or remove when it touches the harness.
+- Nothing in the repo can generate a position. By design until Stage D.
+
+
+## Session Update: Stage A.1 -- Label Metadata + Overlap Measurement (2026-08-14)
+
+Stage A, task A.1, gating on **Gate A** (apparatus, not hypothesis). Suite **270 -> 284 passed**. Nothing
+committed. Gate A is NOT reached -- A.2 through A.6 remain.
+
+### What A.1 added
+
+`apply_triple_barrier` now emits four per-sample columns:
+
+| column | meaning |
+|---|---|
+| `t0` | event time. Also the index, but emitted as a column because `pool_assets` yields a NON-UNIQUE index (BTC and ETH share timestamps), so post-pooling code cannot recover event time from the index alone |
+| `t1` | barrier-touch or vertical-barrier time |
+| `barrier_touched` | `'tp'` / `'sl'` / `'vertical'` |
+| `realised_return` | signed fractional return t0 -> t1, long-only convention |
+
+`t1` is resolved by BAR POSITION, then converted to a timestamp, rather than by wall-clock arithmetic on `t0`.
+This matters because exchange outages leave real gaps in the index (`data_engine` classifies them), so
+`t0 + 48h` is not reliably a bar that exists. Every t1 is therefore guaranteed to be an actually-observed
+timestamp -- asserted in `test_t1_is_always_an_observed_bar_timestamp` and
+`test_t1_survives_a_gapped_irregular_index`.
+
+`duration` already encoded this offset as a bar COUNT, which is why the backfill was possible at all -- but a
+count is unusable for purging without resolution to a timestamp. An internal assertion in the labeller now
+raises if `t1 != t0 + duration` for any row, because the tp/sl and vertical branches reach `touch_idx` by
+different routes and a divergence would silently corrupt every future purge boundary.
+
+Added `tests/test_label_metadata.py` (14 tests).
+
+### Backfill note
+
+There is no persisted labelled dataset in this repo -- `data/raw/` holds raw OHLCV only. "Backfill" therefore
+means regenerating the labelled frame through the same `build_asset_modeling_frame` path every prior
+measurement used, now carrying the metadata. Tool: `scripts/measure_label_overlap.py` (kept).
+
+### MEASURED: label duration (t1 - t0), in bars
+
+Full real datasets, `max_candles=48` (config.yaml's value).
+
+| statistic | BTC/USDT 1h | ETH/USDT 1h |
+|---|---|---|
+| n labels | 78,378 | 35,073 |
+| min | 1 | 1 |
+| **median** | **5** | **5** |
+| mean | 7.48 | 7.15 |
+| p75 | 10 | 9 |
+| **p90** | **17** | **16** |
+| p99 | 45 | 45 |
+| **max** | **48** | **48** |
+
+Heavily right-skewed: the median label resolves in 5 bars, but the tail runs to the 48-bar vertical barrier.
+
+### Why the distribution has that shape (inspected, not assumed)
+
+| route | BTC n | share | median dur | p90 dur |
+|---|---|---|---|---|
+| `sl` | 51,804 | 66.10% | 4 | 14 |
+| `tp` | 25,947 | 33.10% | 7 | 19 |
+| `vertical` | 627 | **0.80%** | 48 | 48 |
+
+The short median is barrier geometry, not fast markets. The stop sits at 1xATR and the target at 2xATR, so the
+nearer barrier is hit first and hit sooner -- `sl` resolves in a median 4 bars against `tp`'s 7. **The vertical
+barrier is almost never reached: 0.8% of labels.** The 48-bar horizon is therefore nearly irrelevant to the
+duration distribution; it binds on fewer than 1 in 100 samples. Consistent with S1 (the 65/34 split is
+`sl/(tp+sl)` arithmetic), and this is the same fact viewed in the time domain.
+
+### MEASURED: overlap
+
+Concurrency `c_t` = number of label windows `[t0_i, t1_i]` spanning bar t.
+
+| statistic | BTC | ETH |
+|---|---|---|
+| bars spanned by >=1 label | 78,379 of 78,379 | 35,074 of 35,074 |
+| **mean concurrency** | **8.48** | **8.15** |
+| median concurrency | 7 | 7 |
+| p90 concurrency | 16 | 15 |
+| max concurrency | 43 | 42 |
+
+Mean concurrency (8.48) equals mean duration + 1 (7.48 + 1), as it must when one label starts per bar -- an
+internal consistency check, not an independent finding.
+
+**Roughly 8-9 labels read every bar.** Nominal n is overstating independent information by close to an order of
+magnitude.
+
+### PREVIEW of effective n -- NOT the A.2 implementation
+
+Computed directly from the concurrency counts to size the problem before A.2 is built. A.2 implements this
+properly and wires it into training weights; nothing here touches the training path.
+
+| | BTC | ETH |
+|---|---|---|
+| nominal n | 78,378 | 35,073 |
+| mean uniqueness | 0.1442 | 0.1503 |
+| **effective n** | **11,306 (14.42%)** | **5,270 (15.03%)** |
+
+**This is higher than BUILD_PLAN_v2 A.6 predicted.** That section states "effective n is plausibly 3-5% of
+nominal". Measured is ~14-15%, roughly 3x more favourable. CI widening at A.6 should therefore be milder than
+the plan anticipates -- on the order of sqrt(1/0.1442) ~ 2.6x, not sqrt(1/0.04) = 5x. The compressed-regime CI
+`[0.519, 0.559]` (half-width 0.020) would widen to roughly +/-0.053, i.e. about `[0.487, 0.591]` -- **still
+straddling 0.5.** A.6 must compute this properly rather than rely on that scaling; it is recorded here as an
+expectation set in advance, so the real number is not read as a surprise either way.
+
+### FINDING: `realised_return` is barrier geometry, not trade quality
+
+Flagged because it directly affects Stage D's primary metric.
+
+Verified on all 77,751 barrier-resolved BTC rows, to floating-point precision (max abs error 1.2e-16):
+conditional on `barrier_touched`, `realised_return` is EXACTLY `mult * ATR_entry / close_entry`. Every `tp` row
+is `+2*ATR/entry`; every `sl` row is `-1*ATR/entry`. Values differ between rows only because ATR/price differs,
+**never because the trade went better or worse.**
+
+This was caught by an I4 inspection, not by reasoning: the first script run printed "78,378 distinct values"
+next to a docstring claiming the column was degenerate. The two were both right and both misleading -- the
+column is not constant, it is a deterministic function of the entry bar carrying zero path information. The
+first attempt to verify this also failed for an unrelated reason worth recording: `vol_atr_14` in the modeling
+frame is PERCENTILE-RANKED, not raw; the raw series is `raw_atr` and only present when
+`build_asset_modeling_frame(..., keep_raw_atr=True)`.
+
+Consequence for Stage D: BUILD_PLAN_v2 D.3 makes **top-decile realised EV the PRIMARY metric** and Gate D
+requires it > 0. Computed against these labels, that metric would rank events by their entry-bar ATR/price
+ratio -- i.e. by volatility exposure -- not by model skill. Before Gate D can mean anything, `realised_return`
+needs to respond to the path (priced against actual fills, or against the exit engine's real exit). **Recorded
+now rather than at Stage D, because Stage D's gate is unreadable without it.**
+
+Sanity check consistent with S1: overall mean realised_return is -0.000101 (BTC), i.e. ~0. With 66.1% at
+-ATR/entry and 33.1% at +2*ATR/entry, the geometry cancels to zero by construction.
+
+### Also noted, not changed
+
+The barrier-scan window is `highs[i+1 : i+max_candles]` -- bars i+1 through i+max_candles-1, which is
+`max_candles - 1` bars -- while the vertical barrier resolves at bar `i+max_candles`. **Bar i+max_candles is
+checked for neither TP nor SL touch**, but is used as the vertical exit. A TP-touching wick on exactly that bar
+is recorded as a vertical resolution at the close instead. Affects at most the 0.8% of labels that reach the
+vertical barrier. **Not changed** -- it would alter every existing label and therefore every recorded
+measurement in this file. Flagged for an explicit decision at A.6, when labels are regenerated anyway.
+
+### Gate A status: NOT REACHED
+
+| task | status |
+|---|---|
+| A.1 Label metadata (t0, t1, barrier_touched, realised_return) | **DONE** |
+| A.2 Sample uniqueness / `n_eff` in training weights | not started (measured as preview only) |
+| A.3 Purged K-Fold + embargo | not started |
+| A.4 Harness defect fixes (S11/S12/I3) | not started |
+| A.5 `trials.jsonl` + DSR | not started -- file still absent |
+| A.6 Recompute Stage 5 ceiling under corrected apparatus | not started |
+
+Gate A additionally requires a synthetic leakage test (inject a deliberately leaked feature; confirm the old
+splitter shows inflated AUC and the new one does not). Not built.
+
+### Next Steps
+
+1. **A.2 -- uniqueness weighting.** The measurement above is the input: mean uniqueness 0.144, so training
+   weights will down-weight the average sample ~7x. Report `n_eff` alongside nominal n everywhere (I6).
+2. **A.3 -- Purged K-Fold + embargo**, now unblocked: `t1` exists, so the purge predicate
+   (`[t0_i, t1_i]` overlaps the test fold) is finally expressible. Embargo h = 0.01 x total observations.
+3. **Decide the `realised_return` pricing question** before Stage D, not at it.
+4. **Decide the vertical-barrier off-by-one** at A.6, when labels are regenerated.
+
+
+## Session Update: Stage A.2 -- Sample Uniqueness and Effective n (2026-08-14)
+
+Stage A, task A.2, gating on **Gate A**. Suite **284 -> 302 passed**. Nothing committed.
+
+### THE NUMBERS
+
+BTC/USDT 1h, full labelled dataset, `max_candles=48`, compression at the live Layer 6 threshold
+(ATR pct <= 0.20, per S6):
+
+| set | nominal n | n_eff | ratio | mean c_t |
+|---|---|---|---|---|
+| **FULL dataset** | **78,378** | **11,305.6** | **0.1442** | 8.48 |
+| **COMPRESSED, own concurrency** | **20,201** | **3,639.9** | **0.1802** | 6.72 |
+| COMPRESSED, in-situ (full-data concurrency) | 20,201 | 2,286.4 | 0.1132 | -- |
+
+The two compressed rows answer different questions and are both reported because choosing one silently would
+hide a methodological decision:
+
+- **own concurrency** -- overlap among the compressed labels themselves. What an estimator trained ONLY on this
+  subset actually sees. This is the figure to use when the compressed set is the training set.
+- **in-situ** -- each compressed label's uniqueness within the full label set, counting the non-compressed
+  neighbours it overlaps. Lower, because those neighbours are real overlap even when excluded from training.
+
+The compressed subset's own-concurrency ratio (0.1802) is higher than the full dataset's (0.1442): compressed
+bars are lower-volatility, so barriers set at multiples of a smaller ATR are still hit at a similar rate, while
+removing the non-compressed labels removes overlap partners. Mean concurrency drops 8.48 -> 6.72 accordingly.
+
+Per the instruction, no interpretation of what these imply is offered here. Implications are A.6's.
+
+### Implementation
+
+New module `src/predictive_core/uniqueness.py`, implementing AFML ch. 4 exactly as specified:
+
+    indicator 1[t,i] -> concurrency c_t -> uniqueness u[t,i] -> avg u_bar_i -> n_eff = sum u_bar_i
+
+`average_uniqueness()` returns a `UniquenessResult` carrying `average_uniqueness`, `nominal_n`, `effective_n`,
+`ratio`, `max_concurrency`, `mean_concurrency`. `uniqueness_sample_weights()` returns weights normalised to
+mean 1.0 (relative weighting unchanged; absolute scale kept so `min_child_samples`/`min_child_weight` stay
+comparable with an unweighted baseline) plus the unnormalised result, so n_eff is never inflated by
+normalisation.
+
+**Not built as the literal indicator matrix.** At 78,378 labels that matrix is ~6.1e9 cells, which is why
+AFML's pandas reference implementation does not scale here. Uses a difference array plus prefix sums --
+exactly equivalent, O(n log n), dominated by the sort.
+
+### Two correctness properties, both tested
+
+1. **Uniqueness is per-asset.** A BTC label and an ETH label spanning the same hour do not read the same
+   information. `average_uniqueness(..., groups=asset)` computes concurrency independently within each asset.
+   Omitting `groups` on a pooled frame silently halves every uniqueness value --
+   `test_labels_on_different_assets_do_not_dilute_each_other` asserts both the grouped (u_bar=1.0, n_eff=2.0)
+   and ungrouped (u_bar=0.5, n_eff=1.0) results so the difference is pinned, and
+   `test_grouping_still_penalises_overlap_within_one_asset` confirms grouping is not a blanket exemption.
+
+   This is the same failure mode as the cross-asset bug in the since-deleted k-NN `_deduplicate`
+   (project_state.md, 2026-08-12), where row adjacency in a pooled frame was mistaken for temporal adjacency
+   within one instrument.
+
+2. **Uniqueness is a property of the sample SET, not of the market.** Subset the labels and the survivors
+   become more unique, because the labels they overlapped with are gone. `restrict_to=` makes that choice
+   explicit rather than implied by whichever frame was passed. This is exactly the 0.1802 vs 0.1132 gap above.
+
+### Tests (18 new, in `tests/test_uniqueness.py`)
+
+Checked against hand-derived arithmetic rather than against the implementation:
+
+- disjoint windows -> u_bar = 1.0, n_eff = nominal exactly
+- k coincident labels -> u_bar = 1/k, n_eff = 1.0, for k in {2,3,5,9}
+- partial overlap (A spans bars 0-2, B spans 1-3, c = [1,2,2,1]) -> both u_bar = 2/3, n_eff = 4/3, derived
+  longhand in the test docstring
+- randomised property sweep: 0 < u_bar <= 1 and 0 < n_eff <= nominal across 25 random configurations
+- rejects t1 < t0, rejects mismatched lengths, empty input returns n_eff 0.0 not NaN
+
+### I6 wiring
+
+`QuantileFoldResult` gained `n_eff_train`, `n_eff_val`, `n_eff_test`, `uniqueness_weighted`, and
+`n_eff_ratio_train()`. Every result object now carries effective n alongside nominal n.
+
+`train_quantile_regressor(use_uniqueness_weights=True)` (default on) computes u_bar from the TRAIN partition's
+`t0`/`t1` only -- never val, never test -- grouped per asset, and passes it as LightGBM's `weight=` on the
+training Dataset in both the Optuna objective and the final fit. The validation Dataset stays unweighted, so
+early stopping and the Optuna score judge the model on the raw val distribution; weighting changes what the
+loss optimises against, not how the result is evaluated. Same isolation discipline the module already applied.
+
+**Honest degradation, verified:** on a frame without `t0`/`t1`, the result reports
+`uniqueness_weighted=False` and `n_eff_* = None` -- never a fabricated n_eff equal to nominal. An absent
+measurement is not a measurement of no overlap (I5). Asserted in
+`test_missing_label_metadata_reports_none_not_a_fabricated_n_eff`.
+
+Verified end-to-end on a pooled 2-asset synthetic frame: `uniqueness_weighted=True`, n_eff reported for all
+three partitions and strictly below nominal in each (1000 -> 368.3, 300 -> 112.3, 497 -> 192.6).
+
+Tool: `scripts/measure_effective_n.py` (kept).
+
+### Gate A status: NOT REACHED
+
+| task | status |
+|---|---|
+| A.1 Label metadata | **DONE** |
+| A.2 Sample uniqueness, u_bar as training weight, n_eff in results | **DONE** |
+| A.3 Purged K-Fold + embargo | not started |
+| A.4 Harness defect fixes (S11/S12/I3) | not started |
+| A.5 `trials.jsonl` + DSR | not started -- file still absent |
+| A.6 Recompute Stage 5 ceiling under corrected apparatus | not started |
+
+Gate A also requires the synthetic leakage test (inject a leaked feature; old splitter shows inflated AUC, new
+one does not). Not built -- it belongs with A.3.
+
+### Next Steps
+
+1. **A.3 -- Purged K-Fold + embargo.** Unblocked since A.1. Purge training samples whose `[t0_i, t1_i]`
+   overlaps the test fold; embargo h = 0.01 x total observations. Replace `WalkForwardSplitter`'s splitting
+   logic, keep its per-fold reporting structure.
+2. **Build the Gate A synthetic leakage test alongside A.3**, not after it.
+3. Carried forward: `realised_return` pricing question (Stage D's primary metric depends on it), the
+   vertical-barrier off-by-one (decide at A.6), `trials.jsonl` absent, `config.yaml`'s `backtesting:` section
+   unread.
+
+
+## Session Update: Stage A.3 -- Purged K-Fold + Embargo, and the Gate A Leakage Test (2026-08-14)
+
+Stage A, task A.3, gating on **Gate A**. Suite **302 -> 315 passed**. Nothing committed.
+
+### THE LEAKAGE TEST -- the number Gate A asks for
+
+Construction: the label is an i.i.d. coin flip at the bar where it resolves, and the feature identifies WHICH bar
+resolves it. Two samples resolving on the same bar therefore carry the same label. **No genuine signal exists**,
+so achievable AUC without leakage is 0.5000 exactly -- for this realisation, not merely in expectation.
+
+Geometry: n=8,000, max horizon 600 bars, K=40 folds (200-bar test blocks), embargo 1%.
+
+**Leak channel** -- test samples sharing a resolution bar with a training sample:
+
+| fold | UNPURGED | PURGED | of n_test |
+|---|---|---|---|
+| 0 | 63 | **0** | 200 |
+| 1 | 93 | **0** | 200 |
+| 2 | 102 | **0** | 200 |
+| ... | ~30-50% | **0** | 200 |
+
+**Test AUC** (truth = 0.5000):
+
+| | mean AUC | inflation over truth |
+|---|---|---|
+| **UNPURGED** | **0.5184** | **+0.0184** |
+| **PURGED** | **0.5021** | **+0.0021** |
+
+Purging removes ~89% of the fabricated skill and closes the leak channel completely. Training data retained
+after purge+embargo: 88-92% per fold.
+
+Encoded as two permanent tests in `tests/test_purged_kfold.py`:
+`test_gate_a_purging_closes_the_leak_channel_completely` (deterministic -- counts the channel, no model, no
+thresholds) and `test_gate_a_unpurged_splitter_reports_skill_that_does_not_exist` (the statistical half).
+
+### THREE THINGS THAT WENT WRONG BUILDING THIS, ALL FOUND BY INSPECTION
+
+Recorded because each looked convincing before it was checked.
+
+**1. The first leak construction was confounded and its result was meaningless.** It used a random-walk price
+level as the feature and the forward move as the label, on the reasoning that independent increments make true
+AUC exactly 0.5. That is true in expectation over paths, NOT for the single realised path a model actually sees
+-- a realised walk contains genuine level/return structure (a V-shaped stretch makes low levels precede rises).
+The tell was fold 0 showing AUC 0.72 under BOTH splitters, i.e. purging changing nothing. Had only the mean been
+read, "0.5552 vs 0.5172" would have looked like a clean pass. Replaced with the i.i.d.-coin construction, where
+0.5 holds for the specific realisation.
+
+**2. The first implementation was walk-forward, and A.3's embargo clause is dead code in that shape.** A.3
+specifies dropping training samples with `t0 in [T1, T1 + h]` -- AFTER the held-out block. In a pure
+walk-forward layout no training sample is ever after the test block, so that clause can never fire. Every fold
+reported `embargoed 0`, which is what surfaced it. Training data exists on both sides of a block only in
+K-fold, which is what AFML ch. 7 specifies and what the embargo is designed for. Rebuilt as `PurgedKFold`.
+
+**3. My own purge accounting was wrong and overstated the damage.** `n_train_before` was computed as
+`len(rest) + n_purged + n_embargoed`, but `rest` was already the pre-purge candidate set -- a double-count. It
+reported "train 8,441" on an 8,000-row frame, which is impossible on its face. Retention was understated as
+84.8% when it is 91.8%. Fixed, and a balance assertion (`len(train) == n_before - purged - embargoed`) now
+raises rather than printing an impossible number.
+
+### FINDING: the old splitter's real leak is into VALIDATION, not test
+
+Measured on its own geometry (train 2000 / val 400 / test 400):
+
+| fold | train->val shared | train->test shared |
+|---|---|---|
+| 0 | 74 | 4 |
+| 1 | 78 | 1 |
+| 2 | 70 | 1 |
+| ... | 70-101 | 1-6 |
+
+`WalkForwardSplitter` purges **neither**. train->test stays small only because the 400-bar val block partly
+buffers it -- an accident of window sizing, not a property of the splitter, and it stops holding as soon as the
+horizon exceeds the val block. train->val is large regardless.
+
+That is not a lesser problem. Validation drives early stopping and Optuna hyperparameter selection, so the old
+splitter contaminates the partition that CHOOSES the model, then reports that model's score on test as though
+it were clean. Both leaks are closed by the replacement, which purges train against val AND test.
+
+### The same measurement at the project's real geometry
+
+| | value |
+|---|---|
+| unpurged leak channel | **0.06%** of each test fold |
+| purged leak channel | **0.00%** |
+| training retained after purge+embargo | **97.9%** |
+
+At horizon 48 against ~15,700-bar folds the channel touches only fold edges. **Narrow is not zero, and it is not
+bounded** -- it widens with horizon and with fold count, and the cost of closing it is 2.1% of training data.
+
+### Implementation
+
+`src/predictive_core/purged_kfold.py`:
+
+- `purge_and_embargo()` -- free function. PURGE `t0_i <= B1 AND t1_i >= B0`; EMBARGO `B1 < t0_i <= B1 + h`.
+  Embargo bound resolved against the frame's own BAR AXIS, not wall-clock arithmetic, because exchange outages
+  leave real gaps and `B1 + h hours` can land in a hole.
+- `PurgedKFold(n_splits, embargo_pct=0.01, purge=True, val_size=0)` -- contiguous time blocks, training drawn
+  from BOTH sides, optional validation carved from the training side and itself treated as a held-out block
+  that training is purged against.
+- `PurgedFold` -- per-fold reporting detail A.3 asks to keep: `n_train_before`, `n_purged`, `n_embargoed`,
+  `train_retention`, `summary()`.
+- Refuses to split a frame lacking `t0`/`t1` rather than silently skipping purging -- a splitter that skipped
+  silently would be indistinguishable from the one it replaces, which is how the leak survived two phases.
+- `_assert_no_overlap` checks LABEL WINDOWS, not t0 ordering -- the property that actually prevents the leak,
+  asserted directly rather than inferred from construction.
+
+`WalkForwardSplitter` marked SUPERSEDED in its docstring, retained solely as the control arm in the leak
+comparison, with an explicit "do not use it to produce results".
+
+13 new tests, including hand-checkable purge/embargo semantics, training-on-both-sides, embargo actually
+firing, accounting balance, and every row tested exactly once.
+
+Tool: `scripts/leakage_test.py` (kept).
+
+### Gate A status: NOT REACHED -- 3 of 6, but the leakage requirement is MET
+
+| requirement | status |
+|---|---|
+| A.1 Label metadata | **DONE** |
+| A.2 Uniqueness weighting, n_eff in results | **DONE** |
+| A.3 Purged K-Fold + embargo | **DONE** |
+| **Gate A: synthetic leakage test verified** | **DONE** -- 0.5184 -> 0.5021, channel closed |
+| A.4 Harness defect fixes (S11/S12/I3) | not started |
+| A.5 `trials.jsonl` + DSR | not started -- file still absent |
+| A.6 Recompute Stage 5 ceiling under corrected apparatus | not started |
+| Gate A: harness fixes verified by reproducing fold 2 of `all_layers` | not started (needs A.4) |
+| Gate A: `n_eff` reported everywhere, corrected CIs published | partial -- n_eff wired, CIs are A.6 |
+
+### Next Steps
+
+1. **A.4 -- harness defect fixes.** Bankruptcy floor on `equity_curve_from_trade_pnls` (S11), single accounting
+   book (S12), gap-cost cap at position notional, ablation flagging on maxDD/PF before Sharpe (I3).
+2. **A.5 -- `trials.jsonl` + DSR.** Still absent; every configuration evaluated to date is unlogged.
+3. **A.6 -- recompute the ceiling** under purged CV + uniqueness weighting, and publish corrected CIs.
+4. **Wire `PurgedKFold` into `WalkForwardTrainer`**, which still drives the superseded `WalkForwardSplitter`.
+   Deliberately not done in this task: it changes what every training run measures, and belongs with A.6 where
+   the recomputation happens.
+5. Carried forward: `realised_return` pricing (Stage D's primary metric), vertical-barrier off-by-one (A.6),
+   `config.yaml`'s unread `backtesting:` section.
+
+
+## Session Update: Stage A.5 -- Trial Registry and Deflated Sharpe Ratio (2026-08-14)
+
+Stage A, task A.5, gating on **Gate A**. Suite **315 -> 338 passed**. Nothing committed.
+**`trials.jsonl` now exists** and is not gitignored (verified) -- it must travel with the repo.
+
+### THE TRIAL COUNT
+
+**Documented lower bound on distinct configurations already evaluated: 2,024.**
+
+Labelled an underestimate, because it is one.
+
+| source | count |
+|---|---|
+| Optuna trials, documented runs | 1,840 |
+| Non-Optuna configurations, documented | 174 |
+| Ablation variants reconstructed as full records | 10 |
+| **TOTAL (lower bound)** | **2,024** |
+
+Optuna breakdown:
+
+| run | studies | trials |
+|---|---|---|
+| Stage 1 walk-forward (2-trial sanity check) | 20 | 40 |
+| Stage 2 walk-forward (full 15-trial budget) | 20 | 300 |
+| Stage 3 walk-forward (class-weighted re-run) | 20 | 300 |
+| Layer ablation v1 (2 distinct fits) | 40 | 600 |
+| Layer ablation v2 (2 distinct fits) | 40 | 600 |
+
+### TWO COUNTING ASSUMPTIONS THAT WERE WRONG ON THE FIRST PASS
+
+The first computation returned **6,554**. It was inflated ~3.2x by two unchecked assumptions. Both were caught
+by checking the evidence rather than reasoning from the plan.
+
+1. **Studies per fold: assumed 7, actually 4.** The guess was direction(1) + magnitude(3 quantiles) +
+   duration(3). But `Phase2Strategy.fit()` -- read before deletion, and `PredictiveCoreStrategy` was identical
+   here -- trains direction ONCE and `train_quantile_regressor` ONCE for `target_col='magnitude'` only. Duration
+   was never trained by the strategies. 1 + 3 = 4.
+
+2. **Ablation variants: assumed 5 full fits each, actually 2.** The wall-clock timings in the logs settle it:
+   v1 ran 2203.2s, 458.3s, then 8.9s / 13.7s / 4.0s; v2 ran 3302.3s, 654.9s, then 10.2s / 21.0s / 7.8s. A
+   sub-15-second variant cannot have retrained anything -- the runner reused an already-fitted model. Counting
+   all five as full fits inflated the bound 2.5x on this line alone.
+
+An inflated figure presented as a lower bound is not a conservative error. It would overstate the deflation
+term and make DSR look more rigorous than the evidence supports.
+
+### WHAT IS AND IS NOT RECOVERABLE
+
+**Reconstructed with full per-configuration detail (10 records now in `trials.jsonl`):** the 5 variants of each
+ablation run, from `reports/layer_ablation.json` and `layer_ablation_v2.json` -- real metrics, per-fold Sharpes,
+equity_destroyed flags. Written with `source='backfill'` and a `note` citing the file, so reconstructed entries
+are distinguishable from live ones. `n_eff` is `null` on all ten: uniqueness did not exist when they ran and the
+labelled frame was not persisted. Null, not backfilled with nominal n (I5).
+
+**Counted only, not reconstructable:** the Stage 1-3 walk-forward runs and the signal-ceiling measurements are
+described in `project_state.md` with their metrics, but their individual configurations are gone.
+
+**Unrecoverable entirely, and this is the important one:**
+- **Every individual Optuna trial's hyperparameters.** `mlruns/` contains only `.gitkeep` -- MLflow was
+  configured and never written to. No Optuna storage was persisted; every study was built in-memory per call
+  and discarded. For each of the ~1,840 documented trials, the winning parameters are gone along with the 14
+  losing ones.
+- Any run whose output was neither written to `reports/` nor narrated in `project_state.md`. Unknown and
+  unbounded.
+
+**The bound also overcounts in one direction, stated rather than netted away:** identical Optuna configurations
+re-proposed across folds are counted separately here, whereas the live registry hashes them and collapses
+duplicates. Both directions are reported; they are not combined into a single "adjusted" figure, because that
+would present a reconstruction as a measurement.
+
+### Implementation
+
+**`src/predictive_core/trial_registry.py`** -- append-only JSONL, one object per line:
+`{config_hash, timestamp, stage, params, n_eff, result_metrics, nominal_n, source, note}`.
+
+- `config_hash` is SHA-256 over a canonicalised payload: sorted keys, floats normalised, so cosmetic
+  differences (key order, `5` vs `5.0`) do not inflate the count. `stage` participates in the hash -- the same
+  hyperparameters at Stage C and Stage D are two searches of the hypothesis space.
+- `distinct_configuration_count()` is what feeds DSR: distinct, not total lines, since re-evaluating an
+  identical configuration does not widen the space searched.
+- **No update function and no delete function, deliberately.** Corrections are appended as superseding records.
+  A count that can be silently reduced is worse than no count, because DSR computed from it looks rigorous
+  while overstating significance.
+- Appends are flushed and `fsync`ed: a trial that ran but went unrecorded biases the registry in the one
+  direction that flatters DSR.
+- A corrupt trailing line (crash mid-append) costs one record, not the file -- tested.
+- `optuna_logging_callback()` logs **every** trial, not the best one. A search that tried 15 and kept 1 has
+  searched 15; logging only the winner is exactly how DSR gets flattered.
+
+Wired into `train_quantile_regressor(trial_registry_stage=...)`. Default `None` (no logging) so tests and
+exploratory calls do not pollute the registry; any run whose numbers are reported must set it.
+
+**`src/predictive_core/dsr.py`** -- Bailey & Lopez de Prado:
+
+    SR*  = sqrt(V) * [(1-gamma)*Phi^-1(1 - 1/N) + gamma*Phi^-1(1 - 1/(N*e))]
+    DSR  = PSR(SR*) = Phi[(SR - SR*)*sqrt(T-1) / sqrt(1 - g3*SR + ((g4-1)/4)*SR^2)]
+
+`DSRResult` carries every input that determined the answer, so a reported DSR can be audited without re-running
+it, plus `passes_gate` (> 0.5).
+
+**The part that is easy to fudge, and is refused:** `V`, the cross-trial variance of Sharpe ratios, is not
+derivable from one strategy's returns and is not optional -- SR* scales with sqrt(V). Passing
+`var_trial_sharpes=None` **raises**. The caller must supply a float or explicitly opt in to the zero-skill
+approximation `V ~ 1/T` via the literal string `"null"`, and `DSRResult.var_source` records which was used. A
+DSR computed from an invented V looks rigorous and is not.
+
+No annualisation anywhere; SR is per-observation, and the docstring warns that passing an annualised Sharpe with
+a per-observation T inflates DSR by ~sqrt(periods_per_year).
+
+23 new tests, including: SR* matches the closed form; SR* grows with N; PSR against itself is exactly 0.5; PSR
+falls under negative skew and fat tails; **DSR falls monotonically as the trial count rises**; a zero-mean
+return series selected from 2,000 trials fails the gate; and DSR refuses to guess V.
+
+Tools kept: `scripts/backfill_trials.py`.
+
+### What this means for the DSR gate, factually
+
+Gate E requires DSR > 0.5 against the full `trials.jsonl` count. That count starts at a **documented lower bound
+of 2,024 before Stage C has run a single new configuration**. At N=2,024 the deflation term is already
+substantial, and it only grows. No interpretation beyond that here -- Gate E is far off and the returns series
+it would be applied to does not exist yet.
+
+### Gate A status: NOT REACHED -- 4 of 6
+
+| task | status |
+|---|---|
+| A.1 Label metadata | **DONE** |
+| A.2 Uniqueness weighting, n_eff in results | **DONE** |
+| A.3 Purged K-Fold + embargo | **DONE** |
+| Gate A: synthetic leakage test | **DONE** (0.5184 -> 0.5021) |
+| A.5 `trials.jsonl` + DSR | **DONE** |
+| A.4 Harness defect fixes (S11/S12/I3) | **not started** |
+| A.6 Recompute Stage 5 ceiling under corrected apparatus | **not started** |
+| Gate A: fold-2 harness reproduction, sizing/reported maxDD agree | not started (needs A.4) |
+| Gate A: corrected CIs published | not started (A.6) |
+
+### Next Steps
+
+1. **A.4 -- the last unstarted apparatus task.** Bankruptcy floor on `equity_curve_from_trade_pnls` (S11),
+   single accounting book (S12, 20x divergence), gap-cost cap at position notional, ablation flagging on
+   maxDD/PF before Sharpe (I3). Gate A's fold-2 reproduction check depends on it.
+2. **A.6 -- recompute the ceiling** under purged CV + uniqueness weighting, publish corrected CIs, and log every
+   configuration to the registry via `trial_registry_stage`.
+3. **Wire `PurgedKFold` into `WalkForwardTrainer`** (still on the superseded splitter) -- belongs with A.6.
+4. Carried forward: `realised_return` pricing (Stage D's primary metric), vertical-barrier off-by-one (A.6),
+   `config.yaml`'s unread `backtesting:` section.
+
+
+## Session Update: Stage A.4 -- Harness Defect Fixes (2026-08-14)
+
+Stage A, task A.4, gating on **Gate A**. Suite **338 -> 348 passed**. Nothing committed.
+
+### Fix 3 was ALREADY DONE -- verified, not redone
+
+The gap-cost fixes landed in the 2026-08-14 gap-cost session and are present in `costs.py`:
+per-SESSION counting replacing per-bar linearity (lines 339-346), an adverse-fraction correction
+(`DEFAULT_GAP_ADVERSE_FRACTION = 0.5`) for charging a symmetric move as a one-sided cost, and the notional cap
+at line 369 (`MAX_GAP_COST_FRAC_OF_NOTIONAL = 1.0`). Re-implementing would have been duplicated work; the
+brief's description of the defect matches the pre-fix state, not the current one.
+
+**This matters for interpreting fix 2's verification** -- see below.
+
+### Fix 1 -- bankruptcy floor (S11)
+
+`equity_curve_from_trade_pnls` returned `init_cash + cumsum()` with nothing bounding it below. The
+`equity_destroyed` FLAG existed and was set, but the CURVE was never floored, so maxDD could exceed 1.0 --
+a drawdown above 100% describes losing more than everything and continuing to trade.
+
+**Ruin is now absorbing**, not merely clipped: the curve is pinned at 0 from the first crossing onward. A
+pointwise clip would let a later cumsum recovery lift the curve back off the floor and understate the damage.
+Post-fix maxDD <= 1.0 by construction, matching section 7's canonical definition.
+
+`floor_at_zero=False` retained solely so a test can still produce the pre-fix behaviour and assert the fix
+changed something.
+
+**An existing test failed on this fix, correctly.** `test_ruin_detection_disqualifies_sharpe_and_is_reported`
+asserted `max_drawdown(eq) > 1.0` as "the signature of negative equity" -- exactly the impossible value the
+floor removes. Rewritten as `test_ruin_is_floored_at_zero_and_maxdd_cannot_exceed_one`, now asserting maxDD ==
+1.0 exactly, equity never negative, ruin absorbing, and the unfloored path still producing the impossible value
+so a regression fails loudly.
+
+### Fix 2 -- one book (S12 / I7)
+
+The harness ran vectorbt once with fees+slippage, extracted trades, subtracted gap cost afterwards, and built a
+SECOND equity curve from the net PnL. `size_type='targetpercent'` sizes every order as a percentage of
+vectorbt's internal equity -- so sizing read a book that never saw gap cost, while results were computed from a
+different one.
+
+Fixed with a two-pass run: pass 1 discovers the trades (gap cost depends on holding period, unknowable before
+they exist), pass 2 folds the per-trade gap charge into the fee array vectorbt already consumes, as an
+exit-bar fee fraction. `pf.value()` is then the single equity curve, and no cost is applied outside it.
+
+Charged at exit rather than entry, deliberately, and this is the conservative choice: the capital reduction
+lands at the end of the hold rather than being spread across it, so intra-trade equity is not flattered.
+
+Not iterated to a fixed point -- charging gap cost lowers equity, which lowers targetpercent order sizes, which
+slightly lowers the charge. The residual is small and is reported rather than assumed away.
+
+### VERIFICATION -- what could and could not be done
+
+**The literal check Gate A asks for is impossible, and this is not a shortcut.** `all_layers` was produced by
+`Phase2Strategy` driven by `scripts/run_layer_ablation.py`, using `HistoricalAnalogEngine` and
+`EnsembleMetaModel`. All four were deleted at Stage 0 on operator instruction.
+`reports/layer_ablation_v2.json` retains fold 2's Sharpe (-0.162) and trade count (468) but no positions, no
+trades, and no equity curve -- nothing sufficient to rebuild it.
+
+What was verified instead: the DEFECT itself, on real BTC data at fold 2's geometry (2y train / 6m val / 6m
+test from 2022-08-01, test window 2025-08-01 -> 2026-02-01, 4,417 bars), using a deterministic
+moving-average rule so the run reproduces exactly. S12 is a property of the harness's accounting, not of the
+strategy that fed it.
+
+**BEFORE -- two books:**
+
+| | value |
+|---|---|
+| sizing book maxDD (what vectorbt sized off) | 0.008747 |
+| reported book maxDD (what was published) | 0.008140 |
+| final equity, sizing book | $9,970.53 |
+| final equity, reported book | $9,966.07 |
+| difference | **$4.46 = exactly the gap cost** |
+
+**AFTER -- one book:**
+
+| | value |
+|---|---|
+| single book maxDD (sized off AND reported) | 0.008870 |
+| final equity | $9,966.16 |
+
+Sizing and reporting now read the same series, so the two numbers are one number by construction. There is no
+second book left to diverge from.
+
+**THE DIVERGENCE HERE IS 0.93x, NOT THE 20x RECORDED AS S12, AND THAT DIFFERENCE IS REAL RATHER THAN A
+MEASUREMENT ARTEFACT.** S12's 20x was measured against the ORIGINAL unbounded per-bar gap model, where gap cost
+was 96% of fold 2's loss. That model was already replaced (fix 3, above), so the gap cost that drove the
+divergence is now small and bounded. The structural violation was still present and is now fixed; its magnitude
+at current parameters is simply much smaller.
+
+Demonstrated rather than argued, by sweeping gap-cost magnitude:
+
+| adverse frac | gap cost | sizing maxDD | reported maxDD | divergence |
+|---|---|---|---|---|
+| 0.5 (current) | $4.46 | 0.008747 | 0.008140 | 0.93x |
+| 2.0 | $17.82 | 0.008747 | 0.008454 | 0.97x |
+| 10.0 | $89.11 | 0.008747 | 0.014101 | 1.61x |
+| 40.0 | $356.45 | 0.008747 | 0.039987 | 4.57x |
+
+**The sizing-book maxDD is IDENTICAL -- 0.008747 -- at every level, from $4.46 of gap cost to $356.45.** That
+single column is S12 stated exactly: the book that sized the orders could not see gap cost at all, no matter how
+large it got. The reported book moves; the sizing book does not.
+
+Tool: `scripts/verify_single_book.py` (kept).
+
+### Fix 4 -- ablation flagging (I3)
+
+The old flagging lived in `scripts/run_layer_ablation.py`, deleted at Stage 0. Rebuilding it inside the next
+runner would rebuild the defect, so the rule now lives in `src/backtesting/ablation_flagging.py`, tested, and
+whatever Stage E runner appears must call it.
+
+`rank_variants()` **refuses to rank at all** when any variant destroyed equity -- stronger than excluding the
+insolvent ones, because an ablation compares variants against each other and a comparison set containing a
+destroyed account has no common scale. Solvent sets rank on maxDD, then profit factor, then Sharpe.
+`flag_degrading_layers()` consults Sharpe ONLY when both the full-stack and leave-one-out runs are solvent.
+
+A NaN maxDD counts as insolvent: an unmeasurable drawdown is not a good drawdown.
+
+**Regression test replays the real 2026-08-14 ablation numbers and reaches the opposite verdict to the old
+rule.** The old Sharpe-only rule flagged Layer 6 (removing it raised Sharpe -8.284 -> -4.846) and reported
+Layer 7C as the biggest HELP (+4.075 Sharpe). Both runs had maxDD above 1.0, so both Sharpes were arithmetic on
+a destroyed account. The new rule refuses the ranking, flags 7C on solvency/maxDD/PF (1.023 -> 0.056 and
+0.014 -> 0.238 when removed), and never consults Sharpe for either layer because no comparison was admissible.
+
+### Gate A status: ALL SIX TASKS DONE -- gate NOT self-certified
+
+| task | status |
+|---|---|
+| A.1 Label metadata | **DONE** |
+| A.2 Uniqueness weighting, n_eff in results | **DONE** |
+| A.3 Purged K-Fold + embargo | **DONE** |
+| A.4 Harness defect fixes | **DONE** (fix 3 was already done; verified) |
+| A.5 `trials.jsonl` + DSR | **DONE** |
+| A.6 Recompute Stage 5 ceiling under corrected apparatus | **NOT STARTED** |
+
+Gate A's explicit acceptance conditions:
+
+| condition | status |
+|---|---|
+| Purged CV verified by synthetic leakage test | **MET** -- 0.5184 -> 0.5021, channel closed |
+| `n_eff` reported everywhere | **MET** for the trainer; A.6 must carry it into the ceiling results |
+| Corrected CIs published | **NOT MET** -- A.6 |
+| Harness fixes verified by reproducing fold 2 of `all_layers` | **NOT LITERALLY POSSIBLE** -- see above. Mechanism verified on real data at that fold's geometry instead |
+| Test suite green | **MET** -- 348 passed |
+
+**Gate A is not self-certified by the agent (section 10).** The fold-2 condition in particular needs an
+operator ruling: the literal artifact cannot be regenerated because Stage 0 deleted the strategy that made it,
+and I am not going to record a substitute as though it satisfied the original.
+
+### Next Steps
+
+1. **Operator ruling on Gate A**, specifically whether the mechanism-level verification of the harness fixes
+   substitutes acceptably for reproducing fold 2 of a deleted strategy.
+2. **A.6 -- the last apparatus task.** Recompute the unconditioned and conditioned ceiling measurements under
+   purged CV + uniqueness weighting; publish corrected CIs; log every configuration to `trials.jsonl` via
+   `trial_registry_stage`. Expect the compressed-regime CI to widen ~2.6x (measured n_eff ratio 0.1442, not the
+   3-5% the plan anticipated) and quite possibly to straddle 0.5 -- BUILD_PLAN_v2 A.6 states in advance that
+   this is the honest outcome, not a failure.
+3. **Wire `PurgedKFold` into `WalkForwardTrainer`** (still on the superseded splitter) -- belongs with A.6.
+4. Carried forward: `realised_return` pricing (Stage D's primary metric is unreadable without it), the
+   vertical-barrier off-by-one, `config.yaml`'s unread `backtesting:` section.
+
+
+## Session Update: Stage A.6 -- Corrected Ceiling Measurement (2026-08-14)
+
+Stage A, task A.6, the final apparatus task. Suite **348 -> 349 passed**. Nothing committed.
+All 5 configurations logged to `trials.jsonl` (registry now 15 records, 5 with n_eff).
+
+### THE CORRECTED TABLE
+
+BTC/USDT 1h, 78,226 labelled rows (neutral excluded), 39 features. Purged K-Fold K=5, 1% embargo,
+uniqueness-weighted training, CI bootstrap drawing n_eff observations rather than n.
+
+| subset | nominal n | n_eff | ratio | AUC | corrected 95% CI | LL vs base | rounds |
+|---|---|---|---|---|---|---|---|
+| ALL bars (unconditioned) | 78,226 | 11,334 | 0.145 | 0.5244 | **[0.5134, 0.5358]** | -0.00036 | 20.8 |
+| Compressed ATR pct < 0.30 (old Layer 6) | 27,780 | 4,857 | 0.175 | 0.5139 | **[0.4973, 0.5305]** | -0.00264 | 16.8 |
+| **Compressed ATR pct <= 0.20 (LIVE Layer 6)** | 20,198 | 3,641 | 0.180 | **0.5183** | **[0.4986, 0.5374]** | -0.00106 | 6.8 |
+| Expanding 0.30-0.70 | 27,757 | 6,053 | 0.218 | 0.5156 | [0.5006, 0.5313] | -0.00126 | 14.6 |
+| Extended ATR pct > 0.70 | 22,689 | 4,572 | 0.202 | 0.5095 | [0.4929, 0.5267] | -0.00217 | 18.2 |
+
+CI widening, shown against the naive bootstrap so the correction is visible:
+
+| subset | naive CI | naive width | corrected width | factor |
+|---|---|---|---|---|
+| ALL bars | [0.5202, 0.5287] | 0.0085 | 0.0224 | **2.65x** |
+| Compressed < 0.30 | [0.5070, 0.5208] | 0.0138 | 0.0332 | 2.41x |
+| Compressed <= 0.20 | [0.5097, 0.5267] | 0.0170 | 0.0389 | 2.29x |
+| Expanding | [0.5085, 0.5228] | 0.0143 | 0.0307 | 2.15x |
+| Extended | [0.5016, 0.5177] | 0.0161 | 0.0337 | 2.10x |
+
+Widening of 2.1-2.65x, matching the sqrt(1/0.144) ~ 2.63 predicted at Stage A.2. The prediction was recorded in
+advance and the measurement matched it.
+
+### S5 SURVIVAL -- reported separately, as an INPUT TO STAGE C, not a verdict
+
+**S5 does not survive the correction.** The prior finding was: "Signal is present under compression (ATR pct
+<= 0.20, AUC 0.5390, CI [0.519, 0.559]) and absent under expansion/extension (CIs straddle 0.5)." That
+statement rested on the compressed CI sitting entirely above 0.5 while the others did not.
+
+Under corrected apparatus:
+
+- **Compressed <= 0.20: AUC 0.5390 -> 0.5183, CI [0.519, 0.559] -> [0.4986, 0.5374]. The CI now INCLUDES 0.5.**
+- Compressed < 0.30 also includes 0.5 ([0.4973, 0.5305]).
+- Extended includes 0.5 ([0.4929, 0.5267]).
+- **Expanding does NOT include 0.5** ([0.5006, 0.5313]) -- the one subset that previously straddled 0.5 and now
+  marginally does not. Its lower bound clears 0.5 by 0.0006, which is not a finding, it is a boundary.
+- Only the unconditioned set has a CI clearly above 0.5 ([0.5134, 0.5358]).
+
+The gradient S5 described -- signal present in compression, absent in expansion -- **inverts** under the
+corrected apparatus, and both directions sit inside their intervals. The defensible statement is now: no
+volatility subset shows a ceiling distinguishable from the unconditioned one, and the compressed subset in
+particular is no longer distinguishable from chance.
+
+This was pre-registered as a likely outcome (BUILD_PLAN_v2 A.6: "This is the honest number, and it straddling
+0.5 is a likely outcome, not a bug"). It is recorded and carried into Stage C per the plan's sequencing
+rationale, which makes Stage C's flow-data test the decisive experiment precisely so that an S5 failure does not
+end the project. **No termination decision follows from this result.**
+
+Note also: boost rounds are 6.8-20.8 across every subset. S4 established that 2-32 rounds means nothing to fit.
+That diagnostic is unchanged by the corrected apparatus.
+
+### FINDING: uniqueness weighting shifts the class prior, and it is barrier geometry doing it
+
+Every subset shows `LL vs base` NEGATIVE -- the model's logloss is worse than a constant base-rate predictor,
+where Stage 5's unconditioned run had it POSITIVE (+0.00102). Inspected rather than reported as a result.
+
+Measured directly, unconditioned set, same purged CV, weighting toggled:
+
+| | AUC | logloss | vs baseline | mean prediction |
+|---|---|---|---|---|
+| uniqueness-weighted | 0.5244 | 0.63931 | **-0.00036** | 0.3138 |
+| unweighted | 0.5214 | 0.63871 | **+0.00024** | 0.3359 |
+
+- unweighted training base rate: **0.33688**
+- uniqueness-WEIGHTED base rate: **0.31138** (a -2.55pp shift)
+
+**Cause:** `sl` labels resolve in a median 4 bars, `tp` labels in 7 (measured at Stage A.1). Shorter windows
+overlap less, so they score HIGHER uniqueness and take MORE weight. Since `sl` is the down class, weighting
+systematically down-weights "up" and the model learns a prior 2.5pp below the one the test set carries. Every
+subset shows the same signature (calibration gap -0.015 to -0.023).
+
+**AUC is rank-based and immune to this** -- it actually rose slightly under weighting (0.5244 vs 0.5214). Only
+logloss and calibration are affected.
+
+Consequences, recorded rather than resolved here:
+
+1. **`LL vs base` is not comparable across weighted and unweighted runs.** The Stage 5 -> A.6 change in that
+   column is a calibration artifact, not a deterioration in what the model knows. Future logloss comparisons
+   under uniqueness weighting need either a weighted baseline or a recalibration step. Not chosen here, because
+   picking whichever variant looks better after seeing both numbers is exactly the failure mode this project
+   guards against -- both are reported.
+2. **Uniqueness weighting is not class-neutral under asymmetric barriers.** Any label whose duration correlates
+   with its class will inherit this. It affects the Stage D meta-label model directly, whose label ("did this
+   event reach target before stop") has exactly that structure.
+
+### DEFECT FOUND AND FIXED IN MY OWN A.3 CODE
+
+The first A.6 run scored 62,581 of 78,226 rows -- exactly 4/5. Cause: `PurgedKFold` carved its validation set
+from the rows BEFORE the test block, but fold 0's block starts at row 0, so `before` was empty, val came back
+empty, and callers skipped fold 0 entirely. Every out-of-fold estimate silently lost 1/K of the data, and the
+earliest 20% of history was never scored.
+
+Fixed to fall back to the rows AFTER the block, which is legitimate in K-fold where training data exists on both
+sides and purge+embargo apply identically. Regression test
+`test_first_fold_still_gets_a_validation_set` added. Full n restored to 78,226.
+
+Surfaced only because the scored-row count was checked against nominal rather than assumed. It would not have
+changed any conclusion below, but it would have quietly discarded 20% of the data in every future measurement.
+
+### GATE A -- APPARATUS CRITERIA
+
+Gate A tests apparatus correctness, not whether S5 survives.
+
+| criterion | status |
+|---|---|
+| Purged CV verified by synthetic leakage test (old splitter inflated, new not) | **MET** -- 0.5184 -> 0.5021, leak channel closed to 0 |
+| `n_eff` reported everywhere alongside nominal n | **MET** -- in `QuantileFoldResult`, in every A.6 row, in every `trials.jsonl` record |
+| Corrected CIs published | **MET** -- table above, 2.1-2.65x wider, naive CIs shown alongside |
+| Harness fixes verified by reproducing fold 2 of `all_layers` | **NOT LITERALLY POSSIBLE** -- `Phase2Strategy`, `run_layer_ablation.py`, `HistoricalAnalogEngine`, `EnsembleMetaModel` were all deleted at Stage 0. Mechanism verified instead on real BTC data at that fold's geometry: sizing-book maxDD held constant at 0.008747 across gap costs from $4.46 to $356.45 while the reported book moved, then reconciled to one book |
+| Test suite green | **MET** -- 349 passed |
+
+**Four of five met. The fifth is not refusable-or-passable by me** -- the artifact cannot be regenerated because
+Stage 0 deleted the code that produced it, on instruction. **Gate A is not self-certified by the agent (section
+10) and requires operator sign-off.**
+
+### Next Steps
+
+1. **Operator sign-off on Gate A**, including a ruling on the fold-2 criterion.
+2. **Stage B and Stage C.** Per BUILD_PLAN_v2's sequencing rationale, Stage A was explicitly structured NOT to
+   kill the project on an S5 failure, and Stage C's flow-data ceiling test is the decisive experiment. Stage B
+   data acquisition is the long pole and has not started -- vendor evaluation was flagged as Day 1 work five
+   sessions ago and remains untouched.
+3. **Carry the S5 result into Stage C's interpretation**, per the plan.
+4. **Decide the uniqueness/calibration interaction** before Stage D, since the meta-label model has the same
+   duration/class correlation.
+5. Carried forward: `realised_return` pricing (Stage D's primary metric), the vertical-barrier off-by-one (this
+   was the point at which labels were regenerated, and it was NOT changed -- still open), `config.yaml`'s unread
+   `backtesting:` section, `WalkForwardTrainer` still on the superseded splitter.
+
+
+## Session Update: Stage B.1 -- Free-Source Ingestion (2026-08-14)
+
+Stage B, task B.1, working toward **Gate B**. Suite **349 -> 361 passed**. Nothing committed.
+All sources persisted to `data/raw/`.
+
+### COVERAGE, GAPS, ROW COUNTS
+
+| source | rows | start | end | outliers | gaps by class |
+|---|---|---|---|---|---|
+| BTC/USDT 1h (reference) | 78,666 | 2017-08-17 | 2026-08-13 | 71 | data_error=25, illiquid_period=3 |
+| BTC/USDT 1d OHLCV | 3,284 | 2017-08-17 | 2026-08-13 | 271 | none |
+| BTC/USDT 1w OHLCV | 469 | 2017-08-20 | 2026-08-09 | 274 | none |
+| Funding rate 8h | 7,592 | 2019-09-10 | 2026-08-14 | 0 | none |
+| Perp-spot basis 1h | 58,198 | 2019-12-23 | 2026-08-14 | 0 | data_error=13, illiquid_period=2 |
+| FRED dxy_proxy (DTWEXBGS) | 5,164 | 2006-01-02 | 2026-08-07 | 0 | data_gap=8, market_closed=1,121 |
+| FRED us10y (DGS10) | 16,138 | 1962-01-02 | 2026-08-12 | 0 | data_gap=4, market_closed=3,593 |
+| FRED vix (VIXCLS) | 9,251 | 1990-01-02 | 2026-08-13 | 0 | data_gap=3, market_closed=1,987 |
+
+### SOURCES SHORTER THAN THE BTC 1h WINDOW
+
+| source | shortfall |
+|---|---|
+| **Funding rate 8h** | starts **754 days later** (2019-09-10 vs 2017-08-17) |
+| **Perp-spot basis 1h** | starts **858 days later** (2019-12-23 vs 2017-08-17) |
+| BTC/USDT 1w | starts 2 days later -- weekly bucketing, not a data limitation |
+
+All three FRED series comfortably cover the reference window.
+
+**This is the constraint MASTER_CONTEXT_v2 section 9 predicted, now measured.** Binance BTC perpetuals begin
+2019-09, so every derivatives-flow series is capped at ~7 years against OHLCV's 9. Basis is bounded tighter
+still (2019-12) because `markPriceKlines` history starts later than the funding series. **Any conditioned event
+set built on flow features loses the 2017-2019 period, and Gate B's >= 200 independent events must be counted
+over the flow window, not the OHLCV window.**
+
+### THE DXY SUBSTITUTION -- flagged, not silently accepted
+
+**DXY is not published by FRED.** It is a proprietary ICE index. `DTWEXBGS` (Fed Nominal Broad USD Index) is
+ingested instead, and it is a DIFFERENT INDEX rather than a renamed one:
+
+| | DXY | DTWEXBGS |
+|---|---|---|
+| basket | 6 currencies, ~58% EUR | 26 economies, trade-weighted |
+| weights | fixed since 1973 | reweighted annually |
+| frequency | intraday | daily only |
+
+They correlate strongly but are not interchangeable, and DTWEXBGS's heavier emerging-market weighting behaves
+differently in exactly the risk-off episodes Layer 3 exists to detect. Layer 3's "DXY rising" rule will be
+evaluated against a proxy, and that must be stated wherever the result is reported.
+
+Note also that `config.yaml` uses **UUP** (an ETF tracking DXY futures) via yfinance -- a THIRD series. Three
+different dollar measures are now reachable in this repo. The choice needs to be made once and recorded, not
+left to whichever fetcher a caller reaches for.
+
+### FINDING: the outlier flag is uninformative on coarse bars
+
+| source | outliers | rate |
+|---|---|---|
+| BTC/USDT 1h | 71 of 78,666 | 0.1% |
+| BTC/USDT 1d | 271 of 3,284 | **8.3%** |
+| BTC/USDT 1w | 274 of 469 | **58.4%** |
+
+`flag_outliers(threshold_pct=10.0)` treats a 10% bar move as extreme. On 1h that is genuinely rare; on 1w it is
+routine for BTC, so the flag saturates and 58% of weekly bars are "outliers" -- which is the same as flagging
+nothing.
+
+**Deliberately NOT retuned.** The brief specified the existing Layer 1 pipeline, and quietly changing a
+threshold so a number looks reasonable is the failure mode this project guards against. It needs a
+timeframe-aware threshold before 1d/1w outlier flags are used for anything, and until then those two columns
+should be treated as absent rather than as clean.
+
+### Macro gap classification needed its own calendar
+
+`crypto_fetcher.classify_gaps` assumes a CONTINUOUS market. A weekend in 24/7 crypto is a genuine anomaly; a
+weekend in Treasury yields is the market being shut. Running daily macro through the crypto classifier would
+have reported roughly 2,900 false `data_error` gaps on DGS10 alone.
+
+`fred_fetcher.classify_macro_gaps` therefore classifies against the exchange calendar -- `normal` (<= 1 business
+day), `market_closed` (<= 4 calendar days, i.e. weekends and long weekends), `data_gap` (anything longer). The
+`market_closed` counts in the table above are weekends, not defects; the `data_gap` counts (8 / 4 / 3) are the
+real holes.
+
+### Alignment rules, forward only
+
+Funding and macro are lower-frequency series joined onto 1h bars, and both forward-fill ONLY. A funding rate
+settled at 08:00 is unknown at 04:00, so back-filling it into 00:00-08:00 would leak the outcome of an interval
+into bars inside that interval -- **lookahead that no splitter can catch, because it is baked into the
+feature.** Bars before the first observation stay NaN, never 0 (I5): a zero funding rate is a real market state,
+not an absence.
+
+Tested directly (`test_funding_is_forward_filled_never_back_filled`,
+`test_bars_before_the_first_settlement_are_nan_not_zero`).
+
+Also recorded: FRED publishes on the observation date with a release lag, and this module does NOT model that
+lag. A strict point-in-time backtest must shift these series by their real publication delay.
+
+### Three defects found and fixed during ingestion
+
+1. **Binance treats `startTime=0` as unset.** The first funding run returned 500 rows starting 2026-03-01 --
+   5 months, silently, with no error. Verified directly: `startTime=0` -> 500 rows from 2026-03-01;
+   `startTime=1568000000000` -> 1000 rows from 2019-09-10. Fixed with a positive epoch floor. Also fixed the
+   stop condition: pagination broke on `len(batch) < limit`, but the endpoint returns short pages mid-history,
+   so it ended years early. Now stops only when the cursor stops advancing. **7,592 rows recovered vs 500.**
+2. **`_timeframe_minutes` could not parse `'1w'`** -- both the lookup table and the regex fallback stopped at
+   `'d'`. Hypothesis condition 4 requires 1H/4H/1D/1W, so the weekly timeframe raised rather than resolving.
+3. **pandas deprecated lowercase `'w'` in `resample`.** It still works today with a FutureWarning and will stop
+   in a later pandas. Added `_pandas_resample_alias` so ccxt's vocabulary stays at the call sites, with a test
+   that promotes the FutureWarning to an error -- it fails now rather than breaking silently on upgrade.
+
+12 new tests. Tools kept: `scripts/ingest_stage_b1.py`,
+`src/data_engine/derivatives_fetcher.py`, `src/data_engine/fred_fetcher.py`.
+
+### Gate B status: NOT REACHED
+
+| requirement | status |
+|---|---|
+| B.1 free sources ingested with documented coverage + gap classification | **DONE** |
+| B.2 paid vendor evaluation (liquidations, OI history, long/short ratios) | **NOT STARTED** |
+| B.3 flow feature construction | not started |
+| B.4 sweep detector re-specification (`DEFAULT_LEVEL_TOLERANCE_ATR`, S8) | not started |
+| Gate B: fully-conditioned event count, reported for BOTH windows | not started |
+| Gate B kill: < 200 independent events over the flow window | not evaluated |
+
+### What is still missing, and it is the expensive half
+
+B.1 covers the free sources. **Liquidations -- named in MASTER_CONTEXT_v2 section 9 as the highest-priority
+acquisition and the single most likely source of information absent from OHLCV -- are not obtainable from any
+free endpoint and remain un-ingested.** So do open-interest history and long/short ratios beyond ~30 days.
+These need a vendor (Tardis, Coinglass, Amberdata, Kaiko), and that evaluation was flagged as Day-1
+critical-path work six sessions ago and has still not begun. Stage C, the decisive experiment, is blocked
+behind it.
+
+### Next Steps
+
+1. **B.2 vendor evaluation -- the long pole.** Compare Tardis / Coinglass / Amberdata / Kaiko on history depth,
+   liquidation granularity (per-event vs aggregated), OI interval, and cost. This is an operator procurement
+   decision, not an agent task.
+2. **Decide the dollar-index question** (DTWEXBGS vs UUP vs paid DXY) and record it once.
+3. **B.3 flow features** from what is now ingested (funding level/ROC/extremity percentile, basis level and
+   z-score) -- buildable today, and enough to give Stage C's C-2 arm partial content even before liquidations
+   land.
+4. **B.4 sweep detector retune** -- independent of vendor data, buildable now.
+5. Carried forward: timeframe-aware outlier threshold, `realised_return` pricing (Stage D), vertical-barrier
+   off-by-one, uniqueness/calibration interaction, `config.yaml`'s unread `backtesting:` section.
+

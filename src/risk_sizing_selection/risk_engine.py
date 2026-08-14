@@ -3,10 +3,15 @@ Risk Engine (Layer 9).
 
 Per the Adaptive doc's Layer 9 section: "quantify the downside of each
 potential trade to populate the loss side of the EV equation with
-realistic numbers." Prereqs (Prompt Playbook 2G): 1C (Component A+B,
-`predictive_core.analog_engine`/`predictive_core.boosted_core`) and 2D
-(Volatility Classifier, Layer 6, `macro_mtf_liquidity_vol.volatility_classifier`)
--- both already built.
+realistic numbers." Prereqs (Prompt Playbook 2G): 1C (Component B's
+magnitude quantiles, `predictive_core.boosted_core`) and 2D (Volatility
+Classifier, Layer 6, `macro_mtf_liquidity_vol.volatility_classifier`).
+
+STAGE 0 CAVEAT: this module's `magnitude_p10_pct` input was previously
+sourced from Component B via the deleted strategy adapters. Component A and
+the direction classifier were deleted at Stage 0; the magnitude quantile
+regressor survives, but nothing currently wires it to this engine. Layer 9
+therefore has no live caller until Stage E.
 
 Core outputs (exact spec list): P(loss > 1%), P(loss > 2%), P(loss > 5%),
 P(loss > 10%), a 0-100 risk score, and "tail risk flag, portfolio
@@ -20,7 +25,7 @@ verbatim), and position size / portfolio exposure aggregation is Layer
 10's job. Neither layer exists in this codebase yet -- same "accept the
 already-computed upstream input, don't invent the missing layer" pattern
 used throughout this project (`mtf_alignment.py` accepting already-derived
-directional reads, `explainability.py`'s `TradeRiskSummary`).
+directional reads).
 
 P(loss > T) -- a documented judgment call, not a spec formula. The
 Adaptive doc says these are "derived from the 10th-percentile magnitude

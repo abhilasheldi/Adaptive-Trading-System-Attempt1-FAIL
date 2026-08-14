@@ -85,14 +85,54 @@ def expected_value_per_trade(trade_pnls: pd.Series, trade_notionals: pd.Series) 
 
 
 def equity_curve_from_trade_pnls(
-    trade_pnls: pd.Series, exit_timestamps: pd.Series, bar_index: pd.DatetimeIndex, init_cash: float
+    trade_pnls: pd.Series,
+    exit_timestamps: pd.Series,
+    bar_index: pd.DatetimeIndex,
+    init_cash: float,
+    floor_at_zero: bool = True,
 ) -> pd.Series:
-    """Builds a step equity curve over `bar_index`, crediting each trade's
-    (already cost-adjusted) PnL at its exit bar. Flat between exits."""
+    """Step equity curve over `bar_index`, crediting each trade's (already
+    cost-adjusted) PnL at its exit bar. Flat between exits.
+
+    BANKRUPTCY FLOOR (Stage A.4, finding S11). Previously this returned
+    `init_cash + cumsum()` with nothing bounding it below, so the curve
+    crossed zero and kept going. Two consequences, both observed in the
+    2026-08-14 ablation:
+
+      - `pct_change()` past the zero crossing divides by a zero-or-negative
+        denominator, so every subsequent "return" and any Sharpe built from
+        them is arithmetically meaningless. That run reported maxDD of 1.023
+        and 1.235 alongside a Sharpe that looked BETTER than the solvent
+        baseline.
+      - maxDD exceeded 1.0, which is impossible for a real account. A
+        drawdown of 123% describes losing more than everything and then
+        continuing to trade.
+
+    RUIN IS ABSORBING. Once equity touches zero the account is gone; it does
+    not recover on the next winning trade, because there is no capital left
+    to place it with. The curve is therefore pinned at 0 from the first
+    crossing onward, not merely clipped pointwise. Clipping alone would let
+    a later cumsum recovery lift the curve back off the floor and understate
+    the damage.
+
+    Post-fix, maxDD <= 1.0 by construction (canonical definition, section 7:
+    "Values >= 1.0 are impossible by construction post-fix; if seen, it is a
+    bug").
+
+    `floor_at_zero=False` exists only to reproduce the pre-fix behaviour in
+    tests that assert the fix changed something.
+    """
     pnl_by_exit = pd.Series(trade_pnls.to_numpy(), index=pd.DatetimeIndex(exit_timestamps))
     pnl_by_exit = pnl_by_exit.groupby(level=0).sum()
     realized = pnl_by_exit.reindex(bar_index, fill_value=0.0)
-    return init_cash + realized.cumsum()
+    curve = init_cash + realized.cumsum()
+
+    if floor_at_zero:
+        destroyed = curve <= 0.0
+        if bool(destroyed.any()):
+            first = int(np.argmax(destroyed.to_numpy()))
+            curve.iloc[first:] = 0.0
+    return curve
 
 
 def infer_bars_per_year(bar_index: pd.DatetimeIndex) -> float:

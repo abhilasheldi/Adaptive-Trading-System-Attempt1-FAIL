@@ -137,7 +137,7 @@ def test_event_in_the_past_does_not_trigger():
 
 def test_event_window_check_is_tz_safe():
     """Regression-shaped test mirroring the tz-aware/tz-naive bug found and
-    fixed in HistoricalAnalogEngine.predict() earlier this project: a
+    fixed in the since-deleted k-NN analog engine earlier this project: a
     tz-naive event timestamp against a tz-aware snapshot timestamp must not
     raise, and must be treated as the same wall-clock UTC instant."""
     naive_event = pd.Timestamp("2024-01-01 06:00:00")  # no tz, same instant as T + 6h in UTC

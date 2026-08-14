@@ -45,8 +45,7 @@ using it surfaces later, add it explicitly and document why -- don't guess.
 
 Every threshold below is labeled as either an EXACT MASTER_CONTEXT number
 (hardcoded, not a function parameter -- consistent with how this project
-already treats other exact spec numbers, e.g.
-`HistoricalAnalogEngine`'s N>=50 gate) or an explicit, documented judgment
+already treats other exact spec numbers) or an explicit, documented judgment
 call (a tunable parameter, because MASTER_CONTEXT's table leaves it
 genuinely unspecified): "VIX spiking" has no numeric definition anywhere
 in the source docs (the *asset* volatility Spike definition -- "ATR
@@ -119,8 +118,7 @@ import pandas as pd
 
 # ------------------------------------------------------------------------ #
 # Exact MASTER_CONTEXT numbers -- hardcoded, not configurable (consistent
-# with how this project treats other exact spec numbers elsewhere, e.g.
-# HistoricalAnalogEngine's minimum-50-independent-instances gate).
+# with how this project treats other exact spec numbers elsewhere).
 # ------------------------------------------------------------------------ #
 VIX_RISK_ON_MAX = 20.0
 VIX_RISK_OFF_MIN = 25.0
@@ -335,7 +333,7 @@ def _hours_until(reference: pd.Timestamp, event: pd.Timestamp) -> float:
     Hours from `reference` to `event` (negative if `event` is already in
     the past). Normalizes both to tz-aware UTC before subtracting, rather
     than assuming matching tz-awareness -- the exact class of bug found and
-    fixed in `HistoricalAnalogEngine.predict()` earlier this project (see
+    fixed in the since-deleted k-NN analog engine earlier this project (see
     docs/project_state.md, 2026-08-13 entries): real market data is UTC
     tz-aware, but a caller-supplied event calendar could easily be
     constructed tz-naive, and comparing the two directly would raise.

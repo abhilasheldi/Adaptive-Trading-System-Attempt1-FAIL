@@ -27,7 +27,7 @@ _FLAT_ATR = [1.0] * (SPIKE_LOOKBACK_CANDLES + 1)  # no doubling -- isolates perc
 # ------------------------------------------------------------------------ #
 
 
-def test_compressed_triggered_below_30th_percentile():
+def test_compressed_triggered_below_compression_edge():
     r = classify_volatility_state(0.15, _FLAT_ATR)
     assert r.state == "Compressed"
     assert r.trading_implication == "Pre-breakout; reduce size until directional confirmation"
@@ -81,14 +81,27 @@ def test_high_percentile_without_doubling_is_extended_not_spike():
 # ------------------------------------------------------------------------ #
 
 
-def test_percentile_boundary_at_exactly_30th_is_expanding_not_compressed():
+def test_percentile_exactly_at_compression_edge_is_expanding_not_compressed():
     r = classify_volatility_state(COMPRESSED_MAX_PERCENTILE, _FLAT_ATR)
     assert r.state == "Expanding"
 
 
-def test_percentile_just_below_30th_is_compressed():
+def test_percentile_just_below_compression_edge_is_compressed():
     r = classify_volatility_state(COMPRESSED_MAX_PERCENTILE - 0.001, _FLAT_ATR)
     assert r.state == "Compressed"
+
+
+def test_bars_between_the_old_and_new_compression_edges_now_read_expanding():
+    """Direct behavioural consequence of S6's 0.30 -> 0.20 change: the
+    [0.20, 0.30) band moved OUT of Compressed and INTO Expanding.
+
+    Measured on the real 9-year BTC/USDT 1h frame at Stage 0: 27,791 bars
+    read Compressed at <0.30, 20,201 at <0.20 -- so 7,590 of 78,381 bars
+    (9.7%) changed state. This is not a boundary technicality. It also
+    verified that exactly-0.20 never occurs in `rank(pct=True)` over a
+    252-bar window, which is why the comparison stays strict."""
+    for pct in (0.20, 0.25, 0.299):
+        assert classify_volatility_state(pct, _FLAT_ATR).state == "Expanding"
 
 
 def test_percentile_boundary_at_exactly_70th_is_expanding_not_extended():
@@ -174,7 +187,11 @@ def test_rejects_negative_current_atr():
 
 
 def test_exact_spec_constants():
-    assert COMPRESSED_MAX_PERCENTILE == 0.30
+    # 0.20, not the Layer 6 table's original 0.30, per finding S6 (Stage 0
+    # task 0.4). Asserted as a literal on purpose: this is the guard that
+    # makes an accidental revert to 0.30 fail loudly rather than silently
+    # re-selecting the one subset measured to be worse than baseline.
+    assert COMPRESSED_MAX_PERCENTILE == 0.20
     assert EXTENDED_MIN_PERCENTILE == 0.70
     assert SPIKE_LOOKBACK_CANDLES == 5
     assert SPIKE_RATIO_THRESHOLD == 2.0

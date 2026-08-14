@@ -1,14 +1,22 @@
 """
-Volatility Regime Classifier (Layer 6) -- MASTER_CONTEXT's exact table:
+Volatility Regime Classifier (Layer 6):
 
-    Compressed:  ATR < 30th percentile   -> Pre-breakout; reduce size until
+    Compressed:  ATR < 20th percentile   -> Pre-breakout; reduce size until
                                              directional confirmation
-    Expanding:   30th-70th percentile    -> Active trend initiation;
+    Expanding:   20th-70th percentile    -> Active trend initiation;
                                              standard position sizing
     Extended:    ATR > 70th percentile   -> Mature trend/blow-off; reduce
                                              size, tighten stops aggressively
     Spike:       ATR doubles within 5 candles -> Tail-risk event; no new
                                              entries across all assets
+
+THE COMPRESSION EDGE IS 0.20, NOT MASTER_CONTEXT's ORIGINAL TABLE VALUE OF
+0.30. Changed at Stage 0 task 0.4 per finding S6: measured on 9 years of
+real BTC, the hypothesis text's 0.20 gave AUC 0.5390 [0.519, 0.559] while
+the table's 0.30 gave 0.5238 -- and 0.30 was the only volatility subset
+whose logloss came out WORSE than baseline. The rest of the table
+(Expanding's upper edge, Extended, Spike) is unchanged and still exact.
+The Expanding band therefore now spans 0.20-0.70, not 0.30-0.70.
 
 "Derived from the ATR percentile and Bollinger width features already
 computed in Layer 2" (build instruction) -- this is a THIN classifier, not
@@ -16,7 +24,8 @@ a re-derivation. `feature_calculator.py`'s `_calculate_volatility_features`
 already computes `vol_atr_pct_rank` (the trailing-252-candle rolling
 percentile rank) and, in fact, already computes boolean flags for all four
 of these exact states (`vol_state_compressed`/`vol_state_expanding`/
-`vol_state_extended`/`vol_spike`) using these exact thresholds. This module
+`vol_state_extended`/`vol_spike`) -- and as of Stage 0 task 0.4 it does so
+by IMPORTING the constants below, so the two can no longer drift. This module
 exists as a NAMED, testable classifier because the Adaptive doc's Layer 6
 section explains why: it's "kept as a named output because it feeds the
 Risk Engine (Layer 9) and Position Sizing Engine (Layer 10) directly with a
@@ -108,7 +117,24 @@ from typing import List, Sequence
 
 # Exact MASTER_CONTEXT numbers -- hardcoded, not configurable (consistent
 # with how this project treats other exact spec numbers elsewhere).
-COMPRESSED_MAX_PERCENTILE = 0.30
+#
+# THIS MODULE IS THE SINGLE SOURCE for the Layer 6 percentile band edges.
+# `features.feature_calculator` imports them rather than re-declaring
+# literals; before Stage 0 task 0.4 it hardcoded its own 0.3/0.7, so the
+# Layer 2 `vol_state_*` feature columns and the Layer 6 classifier could
+# disagree about what "Compressed" meant. Do not reintroduce a literal.
+#
+# 0.30 -> 0.20 per finding S6: the hypothesis text's 0.20 threshold measured
+# AUC 0.5390 [0.519, 0.559] against the Layer 6 table's 0.30 at 0.5238, and
+# 0.30 was the ONLY subset whose logloss was WORSE than baseline. The
+# comparison below stays strict (`<`), not `<=` as the hypothesis text
+# writes it: `vol_atr_pct_rank` is `rank(pct=True)` over a 252-bar window,
+# so its values are k/252 for integer-or-half-integer k. Exactly 0.20 would
+# require k = 50.4, which no average of consecutive integer ranks can
+# produce -- the strict/non-strict distinction is therefore empty on this
+# data, and `<` is kept to avoid changing the Extended boundary's parallel
+# form for no measurable reason.
+COMPRESSED_MAX_PERCENTILE = 0.20
 EXTENDED_MIN_PERCENTILE = 0.70
 SPIKE_LOOKBACK_CANDLES = 5
 # "doubles" = ATR rose by >= this factor from any earlier point in the

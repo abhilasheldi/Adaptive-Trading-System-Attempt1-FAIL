@@ -19,6 +19,22 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
+# Layer 6 owns every number in the Layer 6 volatility table. These are
+# IMPORTED, not re-declared: until Stage 0 task 0.4 this module carried its
+# own `SPIKE_LOOKBACK_CANDLES`/`SPIKE_RATIO_THRESHOLD` literals and bare
+# 0.3/0.7 band edges, under a comment asserting they "reference the same
+# numbers" as the classifier -- which was true only by coincidence, and
+# would have silently stopped being true the first time either side moved.
+# The 0.30 -> 0.20 compression change (S6) is exactly that first time.
+# `volatility_classifier` imports only math/dataclasses/typing, so this
+# creates no cycle and no meaningful import cost.
+from src.macro_mtf_liquidity_vol.volatility_classifier import (
+    COMPRESSED_MAX_PERCENTILE,
+    EXTENDED_MIN_PERCENTILE,
+    SPIKE_LOOKBACK_CANDLES,
+    SPIKE_RATIO_THRESHOLD,
+)
+
 logger = logging.getLogger(__name__)
 
 # Configuration constants aligned with MASTER_CONTEXT.md constraints
@@ -26,13 +42,6 @@ LOOKBACK_PERCENTILE = 252
 STRUCTURAL_N_SHORT = 20
 STRUCTURAL_N_LONG = 50
 EPS = 1e-9
-
-# MASTER_CONTEXT Layer 6, exact table: "Spike | ATR doubles within 5 candles".
-# Kept as named constants so `vol_spike` and the Layer 6 classifier
-# (macro_mtf_liquidity_vol.volatility_classifier) reference the same numbers
-# rather than each carrying bare literals -- see `_max_atr_runup_ratio`.
-SPIKE_LOOKBACK_CANDLES = 5
-SPIKE_RATIO_THRESHOLD = 2.0
 
 _REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
 
@@ -287,11 +296,24 @@ def _calculate_volatility_features(df: pd.DataFrame) -> _FeatureSet:
     feats.add_excluded("vol_atr_pct_rank", atr_pct_rank)
     feats.add_excluded("vol_bb_width_pct_rank", bb_width_pct_rank)
 
-    feats.add_excluded("vol_state_compressed", (atr_pct_rank < 0.3).astype(float))
+    # Band edges imported from Layer 6, never re-declared as literals here.
+    # These three masks must partition the percentile axis exactly: Layer 6's
+    # classifier gets that for free from its if/elif/else, but these are three
+    # independent boolean expressions, so a changed edge in one and not the
+    # others would silently leave bars in no state at all.
     feats.add_excluded(
-        "vol_state_expanding", ((atr_pct_rank >= 0.3) & (atr_pct_rank <= 0.7)).astype(float)
+        "vol_state_compressed", (atr_pct_rank < COMPRESSED_MAX_PERCENTILE).astype(float)
     )
-    feats.add_excluded("vol_state_extended", (atr_pct_rank > 0.7).astype(float))
+    feats.add_excluded(
+        "vol_state_expanding",
+        (
+            (atr_pct_rank >= COMPRESSED_MAX_PERCENTILE)
+            & (atr_pct_rank <= EXTENDED_MIN_PERCENTILE)
+        ).astype(float),
+    )
+    feats.add_excluded(
+        "vol_state_extended", (atr_pct_rank > EXTENDED_MIN_PERCENTILE).astype(float)
+    )
 
     spike_ratio = _max_atr_runup_ratio(atr)
     vol_spike = (spike_ratio >= SPIKE_RATIO_THRESHOLD).astype(float)

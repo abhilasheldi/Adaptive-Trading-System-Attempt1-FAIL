@@ -82,12 +82,60 @@ def apply_triple_barrier(
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns 'direction' (1.0 = up, -1.0 = down, 0.0 =
-        neutral), 'magnitude' (MFE), 'duration' aligned with df.index. Rows
-        where no barrier is hit within max_candles AND the vertical barrier
-        itself falls beyond the end of the series are dropped, since their
-        outcome cannot be observed without look-ahead. All other columns
-        (features, regime tags) are preserved for the valid rows.
+        Rows where no barrier is hit within max_candles AND the vertical
+        barrier itself falls beyond the end of the series are dropped, since
+        their outcome cannot be observed without look-ahead. All other
+        columns (features, regime tags) are preserved for the valid rows.
+
+        Label columns:
+
+        direction        1.0 = up, -1.0 = down, 0.0 = neutral
+        magnitude        Maximum Favourable Excursion, in price units. NOT a
+                         realised P&L -- it is the best the trade ever looked,
+                         which no exit rule can actually capture.
+        duration         bars from t0 to t1 (== t1 - t0 in bar counts)
+
+        Stage A.1 metadata (BUILD_PLAN_v2 A.1):
+
+        t0               event time. Also the index; emitted as a column too
+                         because `pool_assets` yields a non-unique index.
+        t1               barrier-touch or vertical-barrier time. THE critical
+                         addition: purging is impossible without it, and its
+                         absence is why the existing temporal partitioning
+                         leaks -- it splits on t0 (a feature timestamp) while
+                         labels stay unresolved until t1.
+        barrier_touched  'tp' | 'sl' | 'vertical'
+        realised_return  signed fractional return from t0 to t1, to a LONG
+                         position. This is the return an exit rule could
+                         actually have captured, unlike `magnitude`.
+
+        `realised_return` pricing, stated because it is a modelling choice
+        and not a fact: tp/sl resolve AT THE BARRIER LEVEL (a resting order
+        fills where it sits), the vertical barrier resolves at the horizon
+        bar's CLOSE (a market exit). Real fills are worse than this
+        (slippage, gapping straight through a stop); that cost belongs to the
+        execution model, not the label.
+
+        CONSEQUENCE, VERIFIED ON REAL DATA AND IMPORTANT FOR STAGE D:
+        conditional on `barrier_touched`, realised_return carries NO
+        information about the price path. Every 'tp' row is exactly
+        +tp_mult*ATR/entry and every 'sl' row exactly -sl_mult*ATR/entry --
+        confirmed to 1e-16 across all 77,751 barrier-resolved BTC rows. The
+        values differ between rows only because ATR/entry differs, never
+        because the trade went better or worse.
+
+        So realised_return here is the barrier geometry restated in return
+        space, not a measurement of trade quality. A "top-decile realised EV"
+        computed on these labels would be ranking bars by their ATR/price
+        ratio, not by skill (BUILD_PLAN_v2 D.3 makes top-decile realised EV
+        the PRIMARY Stage D metric -- it needs a realised return that
+        responds to the path, e.g. one priced against actual fills, or the
+        metric measures volatility exposure instead).
+
+        LONG-ONLY CONVENTION: `direction` records which barrier a long
+        position would have hit first, so `realised_return` is signed from a
+        long's perspective throughout. A short book would need its own
+        labelling pass; this function does not produce one.
     """
     if not isinstance(df.index, pd.DatetimeIndex):
         raise TypeError("DataFrame index must be a DatetimeIndex.")
@@ -112,6 +160,17 @@ def apply_triple_barrier(
     # sentinel values instead of NaN). Keep as float until valid positions
     # are sliced out below, then cast to int only for the rows we keep.
     durations = np.full(n, np.nan, dtype=float)
+
+    # --- Stage A.1 label metadata -------------------------------------- #
+    # `t1_positions` holds the POSITIONAL row offset of each label's
+    # resolution bar, resolved to a timestamp at the end. Positions, not
+    # timestamps, because the vertical barrier is defined in bars and the
+    # index may be irregular (exchange outages leave real gaps -- see
+    # data_engine's gap classification). Converting at the end means t1 is
+    # always an actual observed bar timestamp, never an extrapolated one.
+    t1_positions = np.full(n, -1, dtype=np.int64)
+    barrier_touched = np.empty(n, dtype=object)
+    realised_returns = np.full(n, np.nan, dtype=float)
 
     closes = df["close"].values
     highs = df["high"].values
@@ -170,6 +229,22 @@ def apply_triple_barrier(
             directions[i] = direction
             magnitudes[i] = max(mfe, 0.0)
             durations[i] = touch_offset
+
+            # Realised return is priced AT THE BARRIER LEVEL, not at the
+            # touching bar's close. A stop/target is a resting order: it
+            # fills where it sits, not where the bar happens to close. Using
+            # the close would credit a stopped-out long with whatever
+            # recovery happened after the stop was already taken out --
+            # optimistic by construction. Real fills are worse than this
+            # (slippage, gaps through the level); that cost belongs to the
+            # execution model, not the label.
+            t1_positions[i] = touch_idx
+            if direction == 1.0:
+                barrier_touched[i] = "tp"
+                realised_returns[i] = (tp_level - entry_price) / entry_price
+            else:
+                barrier_touched[i] = "sl"
+                realised_returns[i] = (sl_level - entry_price) / entry_price
             valid_positions.append(i)
         else:
             touch_idx = i + max_candles
@@ -200,6 +275,13 @@ def apply_triple_barrier(
             directions[i] = direction
             magnitudes[i] = max(mfe, 0.0)
             durations[i] = duration
+
+            # Vertical barrier: no resting order was hit, so the position is
+            # closed at the market on the horizon bar. Its close IS the fill
+            # here, unlike the tp/sl branch above.
+            t1_positions[i] = touch_idx
+            barrier_touched[i] = "vertical"
+            realised_returns[i] = (exit_price - entry_price) / entry_price
             valid_positions.append(i)
 
     labels_df = pd.DataFrame(
@@ -221,13 +303,43 @@ def apply_triple_barrier(
     result["magnitude"] = labels_df["magnitude"].values
     result["duration"] = labels_df["duration"].values
 
+    # --- Stage A.1 label metadata (BUILD_PLAN_v2 A.1) ------------------- #
+    # t1 is the critical one: purging is impossible without it. The existing
+    # temporal partitioning splits on t0 (the feature timestamp) alone, so a
+    # training sample whose label is still unresolved at the fold boundary
+    # keeps leaking across it. `duration` already encoded this offset, but
+    # only as a bar COUNT -- unusable for purging without resolving it to an
+    # actual timestamp, which is what this does.
+    #
+    # t0 is emitted as a COLUMN as well as being the index, deliberately:
+    # `pool_assets` produces a non-unique index (BTC and ETH share
+    # timestamps), so any code that needs a per-sample event time after
+    # pooling cannot rely on the index alone.
+    valid_pos_arr = np.asarray(valid_positions, dtype=np.int64)
+    result["t0"] = df.index[valid_pos_arr]
+    result["t1"] = df.index[t1_positions[valid_pos_arr]]
+    result["barrier_touched"] = barrier_touched[valid_pos_arr]
+    result["realised_return"] = realised_returns[valid_pos_arr]
+
+    # Internal consistency: t1 must be the bar `duration` steps after t0.
+    # Asserted rather than assumed, because the tp/sl and vertical branches
+    # compute `touch_idx` by different routes and a divergence between them
+    # would silently corrupt every purge boundary downstream.
+    expected_t1_pos = valid_pos_arr + durations[valid_pos_arr].astype(np.int64)
+    if not np.array_equal(expected_t1_pos, t1_positions[valid_pos_arr]):
+        raise AssertionError(
+            "t1 does not equal t0 + duration for every label -- the barrier "
+            "branches disagree about the resolution bar. Purging built on "
+            "this would be silently wrong."
+        )
+
     # Record the max_candles this call actually used, so a downstream
-    # consumer that ALSO needs to know this horizon (e.g.
-    # PredictiveCoreStrategy, which purges label-horizon overlap at fold
-    # boundaries and must be configured with a matching label_horizon) can
-    # cross-check itself against it instead of trusting a separately-
-    # configured number to happen to agree. Verified (see
-    # predictive_core_strategy.py) that pandas propagates .attrs through
+    # consumer that ALSO needs to know this horizon (any splitter that
+    # purges label-horizon overlap at fold boundaries must be configured
+    # with a matching label_horizon) can cross-check itself against it
+    # instead of trusting a separately-configured number to happen to
+    # agree. This becomes load-bearing at Stage A.3, where Purged K-Fold
+    # needs the real per-sample t1. Verified that pandas propagates .attrs through
     # .iloc/.copy/.assign/.drop/boolean .loc and through pd.concat when all
     # inputs agree -- and safely empties .attrs on concat when inputs
     # DISAGREE, rather than silently picking one, which is why a consumer

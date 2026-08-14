@@ -1,6 +1,19 @@
 """
-Discrimination/skill diagnostics for the Component B direction classifier --
+Discrimination/skill diagnostics for a probabilistic classifier --
 complementary to, and NOT a substitute for, `calibration.py`.
+
+STAGE 0 STATUS: RETAINED, currently no caller in `src/`. Its previous
+caller, the Component B direction classifier, was deleted at Stage 0
+(MASTER_CONTEXT_v2 section 8) -- and these diagnostics are precisely what
+measured it as skill-less (0.004-0.016, finding S7), so they earned their
+keep by producing the number that killed their own caller. BUILD_PLAN_v2
+Stage C requires "logloss vs baseline" for all three ceiling-test arms;
+`baseline_logloss` + `logloss_skill_score` are that measurement.
+
+The class-imbalance discussion below describes the deleted direction
+classifier's labelling geometry and is kept as the worked example of the
+failure mode these checks exist to catch, not as a live description of any
+model in the repo.
 
 Why this module has to exist separately from calibration: calibration (ECE,
 Brier) answers "when the model says X%, is it right X% of the time" --
@@ -45,10 +58,9 @@ from sklearn.metrics import log_loss, precision_recall_fscore_support
 @dataclass(frozen=True)
 class DiscriminationReport:
     """Precision/recall/F1 for ONE class, computed on the test fold from the
-    classifier's ARGMAX prediction -- deliberately the same decision rule
-    `PredictiveCoreStrategy` actually uses to call a direction (argmax of
-    the calibrated probability matrix), not some other threshold, so this
-    diagnostic reflects what the strategy would actually do."""
+    classifier's ARGMAX prediction -- deliberately the decision rule a
+    consuming strategy would actually use to call a class, not some other
+    threshold, so this diagnostic reflects what would actually be traded."""
 
     class_label: str
     precision: float

@@ -1,11 +1,25 @@
 """
-Calibration diagnostics for the Component B direction classifier.
+Calibration measurement: Expected Calibration Error and Brier score.
 
 Spec requirement: "Calibration is checked explicitly: if the model says 70%,
 it should be right 70% of the time, not 58%." A classifier that merely
 outputs softmax scores is NOT calibrated by default -- gradient boosted
 trees are known to produce overconfident probabilities. This module provides
 the numbers that prove (or disprove) calibration, rather than asserting it.
+
+STAGE 0 STATUS: this module is RETAINED but currently has no caller in
+`src/`. Its previous caller, the Component B direction classifier, was
+deleted at Stage 0 (MASTER_CONTEXT_v2 section 8).
+
+It was retained deliberately rather than deleted alongside that classifier.
+The Register's "calibration work premised on that imbalance" refers to the
+isotonic calibrators that were FIT to the 65/34 three-class problem -- those
+were deleted with the classifier. ECE and Brier are geometry-independent
+measurements of any probabilistic classifier and are not premised on any
+class balance. MASTER_CONTEXT_v2 section 1 ranks the measurement apparatus
+above the models, and BUILD_PLAN_v2 D.3 names "calibration on the event set"
+as a required secondary measurement for the Stage D meta-label model. This
+module is that measurement, waiting for its Stage D caller.
 """
 
 from dataclasses import dataclass
