@@ -176,6 +176,11 @@ class PurgedKFold:
 
         bounds = np.linspace(0, n, self.n_splits + 1).astype(int)
 
+        # Every row must end up in exactly one held-out block. Accumulated
+        # here and asserted once the generator is exhausted -- see
+        # `_assert_test_blocks_partition_every_row`.
+        covered: List[np.ndarray] = []
+
         for k in range(self.n_splits):
             lo, hi = bounds[k], bounds[k + 1]
             test_pos = np.arange(lo, hi)
@@ -240,11 +245,17 @@ class PurgedKFold:
                 "purge accounting does not balance: "
                 f"{len(rest)} - {n_pur} - {n_emb} != {len(train_pos)}"
             )
+            covered.append(test_pos)
             yield PurgedFold(
                 fold=k, train=train_pos, test=test_pos, val=val_pos,
                 n_train_before=len(rest),
                 n_purged=n_pur, n_embargoed=n_emb,
             )
+
+        # Reached only on full exhaustion. A caller that breaks out early
+        # never runs this, which is correct -- partial iteration is a caller
+        # choice, whereas a splitter that drops a block is a defect.
+        self._assert_test_blocks_partition_every_row(covered, n)
 
     def split(self, df: pd.DataFrame) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
         for f in self.split_detailed(df):
@@ -263,5 +274,71 @@ class PurgedKFold:
                 f"windows overlapping the held-out block after purging."
             )
 
+    @staticmethod
+    def _assert_test_blocks_partition_every_row(
+        covered: Sequence[np.ndarray], n: int
+    ) -> None:
+        """BUILD_PLAN_v2 amendment 2.1 -- the fold-coverage guard.
 
-__all__ = ["PurgedKFold", "PurgedFold", "purge_and_embargo", "require_label_metadata"]
+        The held-out blocks must PARTITION the data: every row in exactly one
+        block, none twice. The original splitter carved validation from the
+        rows before the test block, which is empty for fold 0, so callers
+        skipped that fold and every out-of-fold estimate silently lost 1/K of
+        the data -- the earliest 20% of history was never scored. It was
+        caught at A.6 only by manually reconciling scored rows against
+        nominal. That reconciliation is now a guard rather than a habit."""
+        if not covered:
+            raise AssertionError(
+                "Fold coverage: no held-out blocks were produced at all."
+            )
+        stacked = np.concatenate(covered)
+        uniq = np.unique(stacked)
+
+        if len(stacked) != len(uniq):
+            raise AssertionError(
+                f"Fold coverage: held-out blocks overlap -- {len(stacked)} positions "
+                f"across {len(covered)} folds but only {len(uniq)} distinct. A row "
+                f"scored in two folds is scored against training data that contains it."
+            )
+        if len(uniq) != n or uniq[0] != 0 or uniq[-1] != n - 1:
+            missing = np.setdiff1d(np.arange(n), uniq)
+            raise AssertionError(
+                f"Fold coverage: {len(uniq)} of {n} rows fall in a held-out block; "
+                f"{len(missing)} never scored (first missing positions: "
+                f"{missing[:10].tolist()}). Any metric computed here describes a "
+                f"different sample than the one reported."
+            )
+
+
+def assert_scored_rows_match_nominal(
+    n_scored: int, n_nominal: int, context: str = "out-of-fold scoring"
+) -> None:
+    """Hard-fail when a CV loop scores fewer rows than it was given.
+
+    Companion to `PurgedKFold._assert_test_blocks_partition_every_row`, for
+    the other end of the pipeline: the splitter can partition correctly and a
+    caller can still drop a fold (single-class training data, an empty
+    validation set, a model that failed to fit). Both produce an estimate over
+    a sample the report does not describe, and A.6 showed the drop is
+    invisible unless counted.
+
+    A fold that genuinely cannot be trained is an operator-visible condition,
+    not something to absorb silently -- which is why this raises rather than
+    warns."""
+    if n_scored != n_nominal:
+        shortfall = n_nominal - n_scored
+        raise AssertionError(
+            f"{context}: scored {n_scored:,} of {n_nominal:,} rows "
+            f"({shortfall:,} unscored, {shortfall / max(n_nominal, 1):.1%}). "
+            f"Folds were dropped. Report the reduced sample deliberately or fix "
+            f"the cause -- do not average over whatever survived."
+        )
+
+
+__all__ = [
+    "PurgedKFold",
+    "PurgedFold",
+    "purge_and_embargo",
+    "require_label_metadata",
+    "assert_scored_rows_match_nominal",
+]

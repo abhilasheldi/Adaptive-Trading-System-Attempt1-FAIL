@@ -22,22 +22,44 @@ episodes Layer 3 is meant to detect. Every downstream use must treat this
 as a proxy. Recorded here rather than in a commit message because Layer 3's
 "DXY rising" rule will be evaluated against it.
 
-`config.yaml` separately uses UUP (an ETF tracking DXY futures) via
-yfinance. That is a THIRD series. Whichever is adopted, the choice must be
-made once and stated, not left to whichever fetcher a caller happens to
-reach for.
+**The choice is settled (B.0.5, 2026-08-15): DTWEXBGS.** The UUP path -- an
+ETF tracking DXY futures, formerly reachable via `macro_fetcher` and
+`config.yaml` -- is DELETED, not deprecated, so there is no longer a third
+dollar series a caller can reach for by accident. `dollar_substitution_note()`
+returns the sentence that must appear wherever a Layer 3 result is reported:
+DTWEXBGS is a different index, not a DXY proxy, and that belongs in the
+report itself rather than only in this docstring.
 
 =========================================================================
-DAILY DATA AGAINST HOURLY BARS
+DAILY DATA AGAINST HOURLY BARS, AND PUBLICATION LAG
 =========================================================================
-All three series are DAILY. Joining them to 1h bars can only be a forward
+Every series here is DAILY. Joining them to 1h bars can only be a forward
 fill, and a forward fill of a daily close carries a stale value for up to
 23 hours. That is acceptable for a regime classifier (regimes persist) and
 would not be acceptable for anything trading the macro release itself.
 
-FRED publishes on the observation date with a release lag. This module does
-NOT model that lag, so a strict point-in-time backtest would need to shift
-these series by their real publication delay. Stated, not silently ignored.
+**Publication lag is now modelled (B.0.4).** FRED stamps an observation
+with the date it DESCRIBES, not the date it was released. Treating the two
+as equal hands the backtest a value hours-to-days before anyone could have
+seen it.
+
+This stopped being a reporting caveat and became blocking when the macro
+condition was restored to H1 (MASTER_CONTEXT section 4, four conditions).
+Macro now gates EVENT FORMATION, not just a feature column: an event set
+built on unlagged macro is contaminated at its definition, and every
+measurement downstream inherits it. A contaminated feature stays in one
+arm; a contaminated event set is in all of them.
+
+`align_to_bars` therefore routes through `point_in_time` with the
+`FRED_DAILY` policy -- minimum one BUSINESS day, per B.0.4. Business, not
+calendar: a calendar shift would place Friday's observation on Saturday, a
+day no statistical agency publishes on, which understates the delay exactly
+when the weekend gap makes it matter most.
+
+One business day is a floor, not the truth. Real release delays vary by
+series and vintage. `fetch_alfred_vintage` is the hook for replacing the
+floor with actual vintages; it needs a FRED API key, which this environment
+does not have.
 """
 
 from __future__ import annotations
@@ -49,6 +71,8 @@ from typing import Dict, Optional
 import pandas as pd
 import requests
 
+from .point_in_time import FRED_DAILY, ObservationPolicy, align_point_in_time
+
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
 # name -> (FRED series id, is_exact_match, note)
@@ -59,7 +83,22 @@ FRED_SERIES: Dict[str, tuple] = {
     ),
     "us10y": ("DGS10", True, "10-Year Treasury Constant Maturity Rate, percent."),
     "vix": ("VIXCLS", True, "CBOE Volatility Index, close."),
+    # B.0.6 -- base currency. USD per ONE GBP, so USD -> GBP is a DIVISION.
+    # Ingested here rather than in a separate FX module because it is a FRED
+    # daily series with exactly the same publication-lag and weekend
+    # semantics as the other three, and splitting it out would mean
+    # maintaining that logic twice.
+    "gbpusd": (
+        "DEXUSUK",
+        True,
+        "U.S. Dollars to One British Pound, daily noon buying rate. "
+        "Base-currency denominator (B.0.6): GBP = USD / gbpusd.",
+    ),
 }
+
+# Series whose absence breaks accounting rather than a feature. Ingest
+# failure here is fatal, not degraded -- see `fetch_macro_frame`.
+REQUIRED_SERIES = ("gbpusd",)
 
 
 def fetch_fred_series(series_id: str, timeout: int = 45) -> pd.Series:
@@ -123,17 +162,64 @@ def classify_macro_gaps(df: pd.DataFrame, column: str) -> pd.Series:
     return out
 
 
-def align_to_bars(macro: pd.DataFrame, bar_index: pd.DatetimeIndex) -> pd.DataFrame:
-    """Forward-fill daily macro onto a bar index.
+def align_to_bars(
+    macro: pd.DataFrame,
+    bar_index: pd.DatetimeIndex,
+    policy: ObservationPolicy = FRED_DAILY,
+) -> pd.DataFrame:
+    """Forward-fill daily macro onto a bar index, at OBSERVATION time (I9).
 
-    Forward only. Back-filling would place a value on bars that preceded its
-    observation. Bars before the first observation stay NaN -- absent, not
-    zero (I5).
+    Changed at B.0.4. This previously aligned on the value date, which
+    treated a FRED observation as knowable on the day it describes. It now
+    shifts by the policy's publication lag first -- one business day by
+    default -- so a Friday observation reaches Monday's bars, not Friday's.
+
+    `policy` is overridable but not optional-by-omission: the default is an
+    explicit, named policy carrying its own justification, not a bare zero.
     """
     if macro.empty:
         return pd.DataFrame(index=bar_index, columns=macro.columns, dtype=float)
-    aligned = macro.reindex(macro.index.union(bar_index)).sort_index().ffill()
-    return aligned.reindex(bar_index)
+    return align_point_in_time(macro, bar_index, policy)
+
+
+def fetch_alfred_vintage(series_id: str, api_key: Optional[str] = None) -> pd.DataFrame:
+    """Real-time vintages from ALFRED -- the exact fix B.0.4 asks for.
+
+    NOT IMPLEMENTED, and deliberately raising rather than silently falling
+    back to the business-day floor. A silent fallback would make a
+    vintage-accurate run indistinguishable from an approximate one in the
+    output, which is the class of ambiguity this project spends its budget
+    avoiding.
+
+    ALFRED needs a FRED API key (`FRED_API_KEY`); this environment has none,
+    which is why `FRED_DAILY`'s one-business-day floor is what actually runs.
+    """
+    raise NotImplementedError(
+        f"ALFRED vintages for {series_id!r} need a FRED API key (FRED_API_KEY), "
+        f"which is not configured. B.0.4 is satisfied in the meantime by the "
+        f"one-business-day floor in point_in_time.FRED_DAILY -- conservative in "
+        f"the safe direction. Wire this up before any result depends on the "
+        f"exact release date rather than on there being a lag at all."
+    )
+
+
+def dollar_substitution_note() -> str:
+    """The sentence that must appear wherever a Layer 3 result is reported.
+
+    B.0.5 requires this phrasing in the REPORTS, not only in the data
+    dictionary. Returned as a string so report writers cannot paraphrase it
+    into something weaker -- "DXY proxy" is precisely the wording that would
+    let a reader assume interchangeability.
+    """
+    return (
+        "Dollar measure: FRED DTWEXBGS (Nominal Broad U.S. Dollar Index). "
+        "This is a DIFFERENT INDEX from ICE DXY, not a proxy for it: 26 "
+        "trade-weighted economies reweighted annually, versus DXY's 6 "
+        "currencies on fixed 1973 weights (~58% EUR). DTWEXBGS's heavier "
+        "emerging-market weighting behaves differently in exactly the "
+        "risk-off episodes Layer 3 exists to detect. Any 'DXY rising' rule "
+        "here is evaluated against a different instrument (S19)."
+    )
 
 
 def save(df: pd.DataFrame, path: Path) -> None:
@@ -144,9 +230,12 @@ def save(df: pd.DataFrame, path: Path) -> None:
 
 __all__ = [
     "FRED_SERIES",
+    "REQUIRED_SERIES",
     "fetch_fred_series",
     "fetch_macro_frame",
+    "fetch_alfred_vintage",
     "classify_macro_gaps",
     "align_to_bars",
+    "dollar_substitution_note",
     "save",
 ]

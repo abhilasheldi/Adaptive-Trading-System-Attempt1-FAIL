@@ -14,6 +14,7 @@ from src.predictive_core.purged_kfold import (
     PurgedKFold,
     PurgedFold,
     purge_and_embargo,
+    assert_scored_rows_match_nominal,
 )
 from src.predictive_core.calibration import (
     expected_calibration_error,
@@ -54,6 +55,7 @@ __all__ = [
     "PurgedKFold",
     "PurgedFold",
     "purge_and_embargo",
+    "assert_scored_rows_match_nominal",
     "UniquenessResult",
     "average_uniqueness",
     "uniqueness_sample_weights",

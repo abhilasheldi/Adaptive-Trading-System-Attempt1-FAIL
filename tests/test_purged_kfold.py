@@ -14,6 +14,7 @@ from sklearn.metrics import roc_auc_score
 
 from src.predictive_core.purged_kfold import (
     PurgedKFold,
+    assert_scored_rows_match_nominal,
     purge_and_embargo,
     require_label_metadata,
 )
@@ -165,6 +166,59 @@ def test_first_fold_still_gets_a_validation_set():
         assert f.val is not None and len(f.val) > 0, f"fold {f.fold} has no validation set"
         assert len(np.intersect1d(f.val, f.test)) == 0
         assert len(np.intersect1d(f.val, f.train)) == 0
+
+
+# ---------------------------------------------------------------------- #
+# Fold-coverage guard (BUILD_PLAN_v2 amendment 2.1)
+# ---------------------------------------------------------------------- #
+
+
+def test_coverage_guard_fires_when_a_held_out_block_goes_missing():
+    """`test_every_row_is_tested_exactly_once_across_folds` above checks the
+    property holds today. This checks the GUARD would catch it breaking --
+    amendment 2.1 asks for a hard failure, not a habit of reconciling by hand.
+
+    The block is dropped by patching the partition check's input, which is the
+    same shape of defect as A.6's skipped fold 0 without needing to reintroduce
+    the bug itself."""
+    n = 500
+    covered = [np.arange(0, 100), np.arange(200, n)]  # 100:200 never held out
+    with pytest.raises(AssertionError, match="never scored"):
+        PurgedKFold._assert_test_blocks_partition_every_row(covered, n)
+
+
+def test_coverage_guard_fires_when_blocks_overlap():
+    covered = [np.arange(0, 300), np.arange(250, 500)]
+    with pytest.raises(AssertionError, match="overlap"):
+        PurgedKFold._assert_test_blocks_partition_every_row(covered, 500)
+
+
+def test_coverage_guard_passes_on_a_real_split():
+    n = 500
+    df = _frame(np.arange(n), np.arange(n) + 5, n_bars=n + 10)
+    assert len(list(PurgedKFold(5).split_detailed(df))) == 5  # exhausts, so the guard runs
+
+
+def test_partial_iteration_does_not_trip_the_coverage_guard():
+    """Breaking out early is a caller's choice; only a splitter that drops a
+    block is a defect. The guard sits after the loop so it never runs on a
+    generator the caller abandoned."""
+    n = 500
+    df = _frame(np.arange(n), np.arange(n) + 5, n_bars=n + 10)
+    gen = PurgedKFold(5).split_detailed(df)
+    first_two = [next(gen), next(gen)]
+    assert len(first_two) == 2
+    gen.close()
+
+
+def test_scored_row_assertion_reproduces_the_a6_shortfall():
+    """The exact A.6 signature: 4/5 of nominal, scored silently."""
+    with pytest.raises(AssertionError, match="62,581 of 78,226"):
+        assert_scored_rows_match_nominal(62_581, 78_226)
+
+
+def test_scored_row_assertion_passes_on_full_coverage():
+    assert_scored_rows_match_nominal(78_226, 78_226)  # must not raise
 
 
 def test_purge_false_is_available_but_changes_nothing_else():

@@ -40,7 +40,10 @@ from src.macro_mtf_liquidity_vol.volatility_classifier import (  # noqa: E402
     COMPRESSED_MAX_PERCENTILE, EXTENDED_MIN_PERCENTILE,
 )
 from src.predictive_core.dataset import build_asset_modeling_frame, feature_columns  # noqa: E402
-from src.predictive_core.purged_kfold import PurgedKFold  # noqa: E402
+from src.predictive_core.purged_kfold import (  # noqa: E402
+    PurgedKFold,
+    assert_scored_rows_match_nominal,
+)
 from src.predictive_core.trial_registry import log_trial  # noqa: E402
 from src.predictive_core.uniqueness import average_uniqueness  # noqa: E402
 
@@ -96,9 +99,16 @@ def evaluate(df, feats, label: str):
     rounds, purged, embargoed = [], 0, 0
 
     splitter = PurgedKFold(N_SPLITS, embargo_pct=EMBARGO_PCT, val_size=VAL_SIZE)
+    skipped: list[str] = []
     for f in splitter.split_detailed(df):
         tr, va, te = f.train, f.val, f.test
-        if va is None or len(va) == 0 or len(np.unique(y_all[tr])) < 2:
+        # Recorded rather than passed over in silence. The assertion after the
+        # loop turns any skip into a hard failure; this only names the cause.
+        if va is None or len(va) == 0:
+            skipped.append(f"fold {f.fold}: empty validation set")
+            continue
+        if len(np.unique(y_all[tr])) < 2:
+            skipped.append(f"fold {f.fold}: single-class training partition")
             continue
         purged += f.n_purged
         embargoed += f.n_embargoed
@@ -114,6 +124,16 @@ def evaluate(df, feats, label: str):
         oof_pred[te] = model.predict(df.iloc[te][feats], num_iteration=model.best_iteration)
 
     mask = ~np.isnan(oof_pred)
+
+    # BUILD_PLAN_v2 amendment 2.1. A.6's first run scored exactly 4/5 of the
+    # rows and nothing said so; the shortfall was found by hand. Counted here
+    # instead, before any metric is computed from `mask`.
+    assert_scored_rows_match_nominal(
+        int(mask.sum()), len(df),
+        context=f"[{label}] purged-CV out-of-fold scoring"
+        + (f" (skipped: {'; '.join(skipped)})" if skipped else ""),
+    )
+
     y, p = y_all[mask], oof_pred[mask]
     if len(np.unique(y)) < 2:
         return None

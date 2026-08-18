@@ -350,6 +350,7 @@ def classify_macro_regime(
     *,
     vix_spike_5d_roc_pct: float = DEFAULT_VIX_SPIKE_5D_ROC_PCT,
     risk_off_correlation_threshold: float = DEFAULT_RISK_OFF_CORRELATION_THRESHOLD,
+    use_dominance_leg: bool = True,
     confidence_scale_dxy_pct: float = DEFAULT_CONFIDENCE_SCALE_DXY_PCT,
     confidence_scale_vix_roc_pct: float = DEFAULT_CONFIDENCE_SCALE_VIX_ROC_PCT,
     confidence_scale_dominance_pct: float = DEFAULT_CONFIDENCE_SCALE_DOMINANCE_PCT,
@@ -419,7 +420,20 @@ def classify_macro_regime(
         snapshot.vix_level > VIX_RISK_OFF_MIN or snapshot.vix_5d_roc_pct >= vix_spike_5d_roc_pct
     )
 
-    dominance_expanding = snapshot.btc_dominance_20d_trend_pct > 0.0
+    # B.5 (2026-08-18): `use_dominance_leg=False` implements the registered
+    # restatement in prereg/condition_3_macro.md -- BTC dominance has no free
+    # historical source and the leg is REMOVED from Risk-On. Removing a
+    # conjunct from an AND is exactly equivalent to holding it True, which is
+    # what this does, so the remaining legs are unchanged.
+    #
+    # An explicit flag rather than a sentinel dominance value: a sentinel
+    # would also feed `risk_on_score` and silently corrupt `confidence`,
+    # producing a number that looks meaningful and is not.
+    #
+    # The leg appears in `risk_on` ONLY -- never in `risk_off` -- so this
+    # cannot change which bars pass H1's `{risk-on, transitional}` filter.
+    # See `test_dominance_leg_cannot_change_the_admitted_set`.
+    dominance_expanding = (snapshot.btc_dominance_20d_trend_pct > 0.0) if use_dominance_leg else True
     correlation_positive = snapshot.btc_qqq_corr_20d > 0.0
     correlation_compressing_to_one = snapshot.btc_qqq_corr_20d >= risk_off_correlation_threshold
 
@@ -428,16 +442,26 @@ def classify_macro_regime(
     # dxy_not_rising/dxy_rising are mutually exclusive by construction, so
     # risk_on and risk_off can never both be true -- no tie-breaking needed.
 
-    risk_on_score = (
+    # B.5: when the dominance leg is removed, its confidence term goes with
+    # it and the average is over 3 legs, not 4. Leaving the term in (at any
+    # value) would report a confidence partly driven by data that does not
+    # exist -- the number would look meaningful and would not be.
+    _risk_on_legs = (
         _clip01(-snapshot.dxy_20d_momentum_pct / confidence_scale_dxy_pct)
         + (
             _clip01((VIX_RISK_ON_MAX - snapshot.vix_level) / VIX_RISK_ON_MAX)
             + _clip01(-snapshot.vix_5d_roc_pct / confidence_scale_vix_roc_pct)
         )
         / 2.0
-        + _clip01(snapshot.btc_dominance_20d_trend_pct / confidence_scale_dominance_pct)
         + _clip01(snapshot.btc_qqq_corr_20d)
-    ) / 4.0
+    )
+    if use_dominance_leg:
+        risk_on_score = (
+            _risk_on_legs
+            + _clip01(snapshot.btc_dominance_20d_trend_pct / confidence_scale_dominance_pct)
+        ) / 4.0
+    else:
+        risk_on_score = _risk_on_legs / 3.0
 
     # NOTE: Risk-Off has three defining conditions (DXY, VIX, correlation --
     # no "dominance" leg, unlike Risk-On's four), so this averages over 3,

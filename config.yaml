@@ -5,11 +5,25 @@ crypto:
   outlier_threshold_pct: 10.0
   gap_tolerance_multiplier: 1.5
 macro:
+  # B.0.5 (2026-08-15): the UUP entry (`dxy_proxy: "UUP"`) is DELETED, not
+  # commented out. UUP is an ETF tracking DXY futures -- a THIRD dollar
+  # series alongside ICE DXY and FRED DTWEXBGS, and it carries ETF-specific
+  # tracking error, expense drag and US market hours that the index does
+  # not. The dollar measure is FRED DTWEXBGS, ingested by
+  # data_engine.fred_fetcher, and nothing else. macro_fetcher hard-fails if
+  # a dollar ticker reappears here.
+  #
+  # Note also that `vix` and `us10y` below duplicate FRED VIXCLS and DGS10.
+  # Same class of defect as the dollar (one concept, two reachable sources),
+  # flagged but NOT resolved here -- B.0.5 rules on the dollar only, and
+  # silently retiring two more series would be scope the ruling did not grant.
   tickers:
-    dxy_proxy: "UUP"
     vix: "^VIX"
     spx: "^GSPC"
-    qqq: "QQQ"
+    # `qqq: "QQQ"` DELETED at B.5 STEP 3. QQQ is single-sourced via
+    # scripts/ingest_qqq.py -> data/raw/QQQ_daily.parquet, because it feeds
+    # condition 3's BTC/QQQ correlation leg (prereg/condition_3_macro.md).
+    # macro_fetcher hard-fails if it reappears here.
     # Not a yfinance ticker. macro_fetcher.ingest_macro() pops this exact key
     # ("btc_dominance") to route it to CoinGecko instead -- the previous key
     # name here was "btc_dom", which didn't match, so this was silently never

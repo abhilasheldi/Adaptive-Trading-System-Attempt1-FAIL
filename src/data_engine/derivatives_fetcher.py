@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import requests
 
+from .acquisition import AcquisitionError, AcquisitionRequest, assert_acquisition
 from .crypto_fetcher import classify_gaps, flag_outliers, remove_duplicates_and_skew
 
 FAPI = "https://fapi.binance.com"
@@ -67,12 +68,23 @@ def _get(url: str, params: Dict, retries: int = 4) -> list:
 _EPOCH_FLOOR_MS = 1_500_000_000_000   # 2017-07-14, well before perp inception
 
 
-def fetch_funding_rates(symbol: str = "BTCUSDT", start_ms: Optional[int] = None) -> pd.DataFrame:
+def fetch_funding_rates(
+    symbol: str = "BTCUSDT",
+    start_ms: Optional[int] = None,
+    expected_min_rows: Optional[int] = None,
+    verify: bool = True,
+) -> pd.DataFrame:
     """Full funding-rate history, paginated forward from `start_ms`.
 
     Paginates on `startTime` rather than `endTime` because the endpoint
     returns the EARLIEST records in a window; walking backwards would
     silently stop at the first full page.
+
+    I10 (B.0.3): the result is verified against the request before it is
+    returned. This endpoint is the one that produced S21 -- `startTime=0`
+    treated as unset, 500 rows returned for 7,592, HTTP 200, no error -- so
+    the check is on by default and `verify=False` exists only for tests that
+    deliberately construct short series.
     """
     rows: List[dict] = []
     cursor = start_ms if start_ms else _EPOCH_FLOOR_MS
@@ -95,6 +107,12 @@ def fetch_funding_rates(symbol: str = "BTCUSDT", start_ms: Optional[int] = None)
         time.sleep(_SLEEP)
 
     if not rows:
+        if verify:
+            raise AcquisitionError(
+                f"[funding:{symbol}] returned no rows at all. Requested from "
+                f"{pd.to_datetime(cursor, unit='ms', utc=True)}. An empty funding "
+                f"history for a live perpetual is a fetch failure, not a fact."
+            )
         return pd.DataFrame(columns=["funding_rate", "mark_price"])
 
     df = pd.DataFrame(rows)
@@ -104,7 +122,24 @@ def fetch_funding_rates(symbol: str = "BTCUSDT", start_ms: Optional[int] = None)
         "funding_rate": pd.to_numeric(df["fundingRate"], errors="coerce"),
         "mark_price": pd.to_numeric(df.get("markPrice"), errors="coerce"),
     })
-    return out[~out.index.duplicated(keep="first")]
+    out = out[~out.index.duplicated(keep="first")]
+
+    if verify:
+        requested_from = pd.to_datetime(start_ms if start_ms else _EPOCH_FLOOR_MS,
+                                        unit="ms", utc=True)
+        assert_acquisition(out, AcquisitionRequest(
+            source=f"funding:{symbol}",
+            requested_start=requested_from,
+            expected_min_rows=expected_min_rows,
+            # BTC perps begin 2019-09 whatever you ask for, so an epoch-floor
+            # request legitimately returns a later start. The slack is wide
+            # ENOUGH to cover instrument inception and no wider -- S21's
+            # failure returned 2026-03, which is ~6.5 years late and still
+            # trips this.
+            allowed_start_slack=pd.Timedelta(days=900),
+            note="S21 guard: startTime=0 silently returned 500 rows for 7,592.",
+        ))
+    return out
 
 
 def classify_funding_gaps(df: pd.DataFrame) -> pd.Series:

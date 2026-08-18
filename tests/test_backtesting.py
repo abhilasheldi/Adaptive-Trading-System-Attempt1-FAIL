@@ -12,6 +12,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+import vectorbt as vbt
 import pytest
 
 from src.backtesting import (
@@ -764,3 +765,105 @@ def test_net_pnl_still_deducts_the_gap_cost():
     cm = TransactionCostModel(gap_adverse_fraction=1.0).fit(df)
     out = cm.apply_gap_cost_to_trades(trades, idx)
     assert (out["net_pnl"] == out["PnL"] - out["gap_cost"]).all()
+
+
+# ------------------------------------------------------------------------ #
+# I3 / S11 -- destroyed equity
+#
+# ADDED after mutation testing (2026-08-18). Two mutants survived the whole
+# 410-test suite before these existed:
+#
+#   M1  remove the `sharpe = float("nan")` forcing on destroyed equity
+#   M2  remove the bankruptcy floor entirely
+#
+# Both passed every test. The cause was coverage, not weak assertions: only
+# one test in the suite mentioned `equity_destroyed`, and it constructed a
+# `VariantOutcome` by hand. NOTHING drove the harness itself to ruin, so
+# neither guard was ever executed under test. A guard that is never reached
+# is indistinguishable from one that is absent.
+# ------------------------------------------------------------------------ #
+
+
+def _ruinous_segment(n: int = 300):
+    """A full-size short held through a 120x rally -- genuine ruin.
+
+    Deliberately violent. Ruin has to be reached through the harness's own
+    order simulation for the guards to fire; a hand-built SegmentResult
+    would test the dataclass rather than the accounting.
+    """
+    idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+    close = 100 * np.exp(np.linspace(0, 4.8, n))
+    df = pd.DataFrame({"close": close, "high": close * 1.01, "low": close * 0.99}, index=idx)
+    positions = pd.Series(0.0, index=idx)
+    positions.iloc[5:] = -1.0
+    cost_model = TransactionCostModel().fit(df.iloc[:50])
+    return df, positions, cost_model
+
+
+def _run_ruinous_segment():
+    df, positions, cost_model = _ruinous_segment()
+    bt = WalkForwardBacktester(
+        strategy_factory=lambda: None, timeframe="1h", init_cash=10_000.0
+    )
+    return bt._run_segment(df, positions, cost_model, fold=0, segment_name="out_of_sample")
+
+
+def test_the_ruin_fixture_actually_reaches_ruin():
+    """Precondition. If this stops destroying the account, the two guard
+    tests below silently stop testing anything -- which is exactly the
+    failure mode that let M1 and M2 survive in the first place."""
+    res = _run_ruinous_segment()
+    assert res.equity_destroyed is True
+    assert res.n_trades > 0
+
+
+def test_destroyed_equity_forces_sharpe_to_nan():
+    """I3. Sharpe over a non-positive equity curve is arithmetically
+    meaningless -- the pct_change denominator has crossed zero -- so it must
+    not be published as a comparable number. Kills mutant M1."""
+    res = _run_ruinous_segment()
+    assert res.equity_destroyed is True
+    assert np.isnan(res.sharpe), (
+        "Sharpe was published over a destroyed equity curve. maxDD and profit "
+        "factor remain valid and are what should be read instead (I3)."
+    )
+    # The metrics that survive ruin must still be finite, or the refusal has
+    # taken the whole result down with it.
+    assert not np.isnan(res.max_drawdown)
+
+
+def test_equity_curve_is_floored_at_zero_and_the_floor_is_load_bearing():
+    """S11. Ruin is absorbing: past zero there is no capital to trade back
+    with. Kills mutant M2.
+
+    The second half matters as much as the first. Asserting `min >= 0` alone
+    would also pass if vectorbt never returned a negative value, making the
+    test vacuous -- so this reconstructs the UNFLOORED curve and confirms it
+    really does go deeply negative."""
+    res = _run_ruinous_segment()
+    assert (res.equity_curve >= 0.0).all()
+    assert res.equity_curve.iloc[-1] == 0.0
+
+    df, positions, cost_model = _ruinous_segment()
+    fees, slippage = cost_model.per_bar_fees_and_slippage(df, positions)
+    changed = positions.ne(positions.shift(1).fillna(0.0))
+    unfloored = vbt.Portfolio.from_orders(
+        close=df["close"], size=positions.where(changed, other=np.nan),
+        size_type="targetpercent", direction="both", fees=fees, slippage=slippage,
+        freq="1h", init_cash=10_000.0,
+    ).value()
+    unfloored = pd.Series(np.asarray(unfloored).ravel(), index=df.index)
+
+    assert (unfloored < 0).any(), "fixture no longer exercises the floor"
+    assert unfloored.min() < -100_000, (
+        f"unfloored equity reached {unfloored.min():,.0f} on a 10,000 account -- "
+        f"the floor is what keeps this off the reported curve"
+    )
+
+
+def test_max_drawdown_cannot_exceed_total_loss_once_floored():
+    """S11's corollary: maxDD > 1.0 is impossible on a floored curve. Total
+    ruin sits exactly at 1.0, which is attainable rather than a bug."""
+    res = _run_ruinous_segment()
+    assert res.max_drawdown <= 1.0
+    assert res.max_drawdown == pytest.approx(1.0)

@@ -137,6 +137,14 @@ LOSS_THRESHOLDS_PCT: Tuple[float, ...] = (1.0, 2.0, 5.0, 10.0)
 
 # MASTER_CONTEXT constraint 6 / Layer 10: "Maximum correlated-direction
 # exposure: 6% of capital."
+#
+# B.0.6 -- "of capital" now means OF GBP CAPITAL. The percentage itself is
+# currency-invariant (2% of GBP equity buys the same position as 2% of the
+# equivalent USD equity; the rate cancels), so this constant does not
+# change. What changes is the BASE it multiplies, and that base is pinned
+# by `backtesting.currency.RiskCapBasis` -- which E.1 must read when it
+# builds the enforcement these constants still lack (S10). Scoring here is
+# not enforcement.
 CORRELATED_DIRECTION_CAP_PCT = 6.0
 
 # MASTER_CONTEXT constraint 8's six-gate requirement: "risk score <= 65/100."

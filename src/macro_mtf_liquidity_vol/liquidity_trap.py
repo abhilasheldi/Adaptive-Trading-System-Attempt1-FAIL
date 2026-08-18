@@ -76,16 +76,50 @@ EQUAL_LEVEL_LOOKBACK = 50
 # "heuristic estimate" and gives no formula for combining proximity/density
 # into a probability, and no numeric tolerance for what counts as "equal."
 # NOT MASTER_CONTEXT/Adaptive-doc exact numbers; tune freely.
-DEFAULT_LEVEL_TOLERANCE_ATR = 0.25  # wicks within this many ATRs of each other count as "equal"
+# B.4 RETUNE (2026-08-18). Was 0.25. Selected by sweeping {0.05, 0.10, 0.15}
+# against a confirmation-rate band of 1-5% FIXED IN ADVANCE, with the
+# compression precondition (atr_percentile <= 0.20) applied. Measured on the
+# frozen v2 BTC 1h series, 78,378 modeling rows:
+#
+#   tol   pen    rate (all bars)   rate (compressed)   events (compressed)
+#   0.05  0.25        2.94%              4.03%  <- selected      815
+#   0.10  0.25        6.48%              8.65%                 1,747
+#   0.15  0.25        8.61%             10.73%                 2,167
+#   0.25  0.25       10.93%             13.04%                 2,634
+#
+# Exactly one configuration landed inside the pre-registered band. Selection
+# was on confirmation rate alone -- no downstream metric was computed by
+# `scripts/measure_b4_sweep_retune.py`, so the event definition cannot have
+# been tuned to the outcome.
+DEFAULT_LEVEL_TOLERANCE_ATR = 0.05  # wicks within this many ATRs of each other count as "equal"
 # Sweep-selectivity thresholds (2026-08-14). Neither is a source-doc number;
 # both exist because breach-and-close-back alone fired on 44.1% of real BTC
 # 1h bars, which cannot be the "specific, programmatically detectable event"
 # the spec describes. See the confirmation block in `estimate_liquidity_trap`
 # for the full measurement and reasoning.
-# Set equal to DEFAULT_LEVEL_TOLERANCE_ATR on purpose, not fitted: a cluster's
-# level is only defined to within +/- that tolerance, so a "penetration"
-# smaller than it is inside the level's own uncertainty band and cannot be
-# distinguished from touching the level.
+# DECOUPLED FROM THE TOLERANCE AT B.4 (2026-08-18). Previously set EQUAL to
+# `DEFAULT_LEVEL_TOLERANCE_ATR` on the grounds that a cluster's level is only
+# defined to within +/- that tolerance, so a "penetration" smaller than it
+# sits inside the level's own uncertainty band and cannot be distinguished
+# from touching the level.
+#
+# That rationale gives a LOWER BOUND -- penetration >= tolerance -- not an
+# equality, and the two parameters mean different things: tolerance decides
+# which wicks form one level, penetration decides how far price must clear it.
+# Holding penetration at 0.25 while tightening tolerance to 0.05 satisfies the
+# bound with room to spare and is strictly MORE conservative than the old
+# equal setting.
+#
+# The distinction is not academic. Sweeping the two coupled together is
+# NON-MONOTONIC, because the effects fight: a tighter tolerance forms fewer
+# and smaller clusters (fewer sweeps) but simultaneously weakens the
+# penetration requirement (more sweeps). Measured, compressed-bar rate:
+#
+#   coupled   0.25 -> 13.04%,  0.15 -> 17.27%,  0.10 -> 16.13%,  0.05 -> 9.84%
+#
+# Tightening the tolerance from 0.25 to 0.15 RAISES the rate. No coupled
+# setting reaches the 1-5% band at all; only the decoupled sweep does.
+# `_assert_penetration_at_least_tolerance` enforces the bound that survives.
 DEFAULT_MIN_PENETRATION_ATR = 0.25
 # Median cluster on real BTC 1h has 3 touches; requiring more than the median
 # restricts sweeps to the better-tested pools. A CLUSTER is still "two or
@@ -353,6 +387,18 @@ def estimate_liquidity_trap(
     if not math.isfinite(min_penetration_atr) or min_penetration_atr < 0:
         raise ValueError(
             f"min_penetration_atr must be finite and non-negative, got {min_penetration_atr}."
+        )
+    # B.4: the bound that survived decoupling. A cluster's level is only
+    # defined to within +/- `level_tolerance_atr`, so a penetration smaller
+    # than that is inside the level's own uncertainty band -- it cannot be
+    # distinguished from merely touching the level, and calling it a sweep
+    # would be reading noise as structure.
+    if min_penetration_atr < level_tolerance_atr:
+        raise ValueError(
+            f"min_penetration_atr ({min_penetration_atr}) is below level_tolerance_atr "
+            f"({level_tolerance_atr}). A cluster's level is only defined to within "
+            f"+/- the tolerance, so a smaller penetration cannot be distinguished from "
+            f"touching the level. Raise the penetration or tighten the tolerance."
         )
     if min_sweep_touches < 2:
         raise ValueError(

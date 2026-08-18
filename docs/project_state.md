@@ -3928,3 +3928,849 @@ behind it.
 5. Carried forward: timeframe-aware outlier threshold, `realised_return` pricing (Stage D), vertical-barrier
    off-by-one, uniqueness/calibration interaction, `config.yaml`'s unread `backtesting:` section.
 
+
+## Session Update: Gate A Closure and Amendment Reconciliation (2026-08-15)
+
+Stage A closure plus B.0.5a. Suite **363 -> 374 passed** (+11). Nothing committed.
+Operator issued rulings 1-7; all are now applied to `architecture/MASTER_CONTEXT_v2.md` and
+`architecture/BUILD_PLAN_v2.md`, which previously carried their amendments as unapplied instructions
+sitting ABOVE the text they contradicted.
+
+### B.0.5a -- the outlier flag is written and never read (new finding S23)
+
+The audit the amendment called for, run first because it determined whether MTF alignment was usable.
+
+`is_outlier` has exactly two references in the repository:
+
+| site | kind |
+|---|---|
+| `src/data_engine/crypto_fetcher.py:333` | the only write |
+| `src/predictive_core/dataset.py:75` | a docstring stating such columns are "simply ignored" |
+
+Zero consumers. Nothing drops, filters, or specially handles flagged bars. Stronger still: **no persisted
+parquet carries the column at all** -- all seven files in `data/raw/` were checked, and
+`scripts/ingest_stage_b1.py` computed outliers in memory purely to print the coverage table.
+
+**Consequence:** S20's 58.4% weekly flag rate destroys nothing. The 1w series is intact and MTF alignment
+(hypothesis condition 4) is unaffected. B.0.5b drops from blocking to convenient, and B.5 proceeds. This was
+the world worth being in, but it had to be established rather than assumed -- the alternative was a 1w series
+58.4% compromised on the critical path.
+
+### Gate A criterion 5 -- two-book reconciliation, built and verified
+
+`tests/test_two_book_reconciliation.py`, 5 tests. The retired fold-2 criterion's substitute per amendment 2.1.
+
+The trap this had to avoid: post-fix, `SegmentResult.equity_curve` IS `pf.value()`, so asserting "the two
+books agree" is a tautology that would pass against a reverted harness that merely renamed one of them. A
+test that cannot fail verifies nothing.
+
+The property that actually separates one book from two is visible in the ORDER SIZES. `size_type='targetpercent'`
+sizes every order as a fraction of the portfolio's own equity, so a gap charge INSIDE that portfolio changes
+the sizes, while a charge subtracted afterwards into a separate reported curve leaves them bit-identical. The
+test therefore prices identical positions twice -- gap channel live, and off via `gap_adverse_fraction=0.0`,
+which isolates the gap term while leaving fees and slippage untouched -- and asserts both equity and sizes move.
+
+**Verified discriminating, not assumed.** Simulated the pre-fix S12 state by patching
+`_gap_cost_as_exit_fee` to return `None` (skipping the second vectorbt pass, so sizing never sees gap cost
+while `net_pnl` still carries the deduction). Result: 2 of 5 tests fail, and the failure quantifies the defect --
+**reported equity moved $611.54 while trades account for $448.85, a $162.69 charge applied outside the book.**
+
+The 3 that still pass under the revert guard different properties (fixture gap-proneness, mark-to-market,
+bankruptcy floor), which is correct rather than a weakness.
+
+The fixture asserts its own preconditions: non-zero fitted weekend gap frequency and magnitude, and at least
+one trade genuinely spanning a weekend. Without that, every downstream assertion would be vacuously true.
+
+### Fold-coverage assertion -- guard, not habit
+
+Two guards, at opposite ends of the pipeline, because the A.6 defect could recur at either:
+
+1. `PurgedKFold._assert_test_blocks_partition_every_row` -- held-out blocks must partition the rows: every row
+   in exactly one block, none twice. Accumulated during iteration and asserted at generator exhaustion.
+   Placement matters: a caller that breaks out early never reaches it, which is correct -- partial iteration is
+   a caller's choice, whereas a splitter that drops a block is a defect.
+2. `assert_scored_rows_match_nominal(n_scored, n_nominal, context)` -- the splitter can partition correctly and
+   a caller can still drop a fold. Wired into `scripts/measure_ceiling_corrected.py`, replacing a silent
+   `continue` at what was line 101. Skip reasons are now recorded and named in the failure message rather than
+   passed over.
+
+Hard-fails rather than warns: a fold that cannot be trained is an operator-visible condition, not something to
+absorb. 6 new tests, including one reproducing A.6's exact signature (62,581 of 78,226 -- 4/5 of nominal).
+
+### Rulings applied to the architecture documents
+
+| # | Ruling | Applied |
+|---|---|---|
+| 1 | Amendments inline; S5/S6 **retired, not deleted** | Retired Findings table sits immediately below the §2 table, keeping original claim, corrected number, and cause. §3, §9, Stage B, Gate C, effort summary replaced in body. Changelog with date and trigger at the top of each file |
+| 2 | Macro is in -- **four** conditions | `macro_regime in {risk-on, transitional}` restored to §4 H1 and to D.1. Recorded as a drafting-error correction that consumes NO budget, with the asymmetry stated in §6: it must never be cheaper to quietly narrow a hypothesis than to test it |
+| 3 | BTC only for Gate B | §9 carries the three reasons; ETH OHLCV-only count reported for information; ETH funding/basis moved to B.2 conditional on the gate passing |
+| 4 | Gate A "Complete, pending two tests" was self-contradictory | Effort summary now reads Complete / **Gate A pending operator sign-off** |
+| 5 | Independent instance = structural + effective count | MASTER_CONTEXT §7 replaced: compression-episode collapse, then `Sum u_i` over event label windows via the A.2 machinery. No new constant. Expected effective/raw ratio 0.7-0.95 recorded IN ADVANCE, so a value in band is not read as confirmation and a value far below it is read as a sampler defect |
+| 6 | Split the outlier audit | B.0.5a done (above); B.0.5b deferred, non-blocking |
+| 7 | DTWEXBGS; delete UUP | Added to §8 DELETE; B.0.4 now says delete the path entirely and state the substitution in reports, not just the data dictionary |
+
+**Ruling 2's consequence, promoted:** because macro now gates event FORMATION rather than feeding a feature,
+unmodelled FRED publication lag would contaminate the event set itself and every downstream measurement would
+inherit it. Added as **B.0.6, blocking for B.5** -- ALFRED vintages where the series supports it, otherwise
+shift >= 1 business day. This is the single scheduling change the rulings caused.
+
+### Gate A status: all six criteria MET -- NOT self-certified
+
+| criterion | status |
+|---|---|
+| Purged CV verified by synthetic leakage test | MET (A.3) |
+| `n_eff` reported everywhere | MET (A.2/A.6) |
+| Corrected CIs published | MET (A.6) |
+| Two-book reconciliation | **MET (this session)** |
+| Fold-coverage assertion | **MET (this session)** |
+| Test suite green | MET -- 374 passed |
+
+**Gate A requires operator sign-off (MASTER_CONTEXT section 10). It is not certified here.**
+
+### Discrepancy noted, not chased
+
+The suite collected 363 before this session's additions; the last recorded figure was 361. A 2-test gap I did
+not investigate. Recorded so the next session does not treat 374 - 361 = 13 as the number of tests added.
+
+### Next Steps
+
+1. **Operator sign-off on Gate A.**
+2. **B.0 hardening**, with B.0.6 (FRED lag) blocking and B.0.1 (dataset freeze) closing the 78,378 / 78,226 /
+   78,666 row-count drift before any B.5 count is computed against it.
+3. **B.4 sweep retune**, then **B.5** -- the free kill test.
+4. Carried forward: `realised_return` pricing (Stage D), vertical-barrier off-by-one,
+   uniqueness/calibration interaction (now specified for D.2 as stratified weighting),
+   `config.yaml`'s unread `backtesting:` section, `WalkForwardTrainer` still on the superseded splitter.
+
+
+## Session Update: No Paid Data Required -- Amendment Pass 2 (2026-08-15)
+
+Documents only; no code touched, suite unchanged at **374**. Operator supplied a second amendment set following a
+Binance Data Vision source review. Applied to both architecture documents.
+
+### The finding that moves the plan
+
+**S23 -- no paid data is required.** Binance publishes open interest, long/short ratios, and taker buy/sell
+volume ratio free via Data Vision `futures/um/daily/metrics/` bulk dumps. The ~30-day limit that drove the
+entire vendor track binds only the REST API path, not the bulk files. Tardis / Coinglass / Amberdata / Kaiko
+are out of the plan entirely.
+
+**S24 -- the live liquidation stream is sampled, not complete.** `!forceOrder@arr` pushes only the largest
+order per 1000ms per symbol, so any forward-collected liquidation series systematically undercounts. Recorded
+now rather than discovered later, because it bounds what the B.2.6 proxy can ever be validated against, and
+under I5 the undercount must be stated wherever a liquidation-derived feature is reported.
+
+Event-level liquidation history is now the single genuine data gap: `liquidationSnapshot` publishing reportedly
+stalled ~2024-03. Handled by an OI-cascade proxy plus forward-only collection from 2026-08.
+
+### What changed
+
+| Location | Change |
+|---|---|
+| MC section 2 | S23, S24 added |
+| MC section 3 | O5 retargeted -- now asks whether `create_time` is a point-in-time snapshot or a window aggregate, resolving at B.2.2. O3's "before any procurement" -> "before any acquisition work" |
+| MC section 9 | Three vendor rows replaced by six free-source rows; hard constraint rewritten around the `metrics` start date (measured at B.2.4) rather than a purchase |
+| BP Gate B | **Vendor decision table deleted.** The gate is purely the event count, no procurement branch. "Buy the narrowest window" and "No money spent" removed |
+| BP B.2 | Vendor evaluation deleted; becomes free bulk acquisition |
+| BP B.3 | Taker buy/sell volume ratio added to the feature list; availability premise corrected |
+| BP effort summary | B.2: 1-2 weeks wall-clock -> **3-5 days, no lead time** |
+| BP critical path | 6-8 weeks from Gate B -> **4-7 weeks**, shortened by ~1-2 weeks |
+| BP sequencing rationale | Items 1 and 3 rewritten. The lead-time argument for running acquisition in parallel is retired -- there is no lead time left to hide behind |
+
+### TWO THINGS THAT NEEDED A DECISION, BOTH FLAGGED
+
+**1. Finding-number collision, resolved by renumbering MINE.** The amendment assigns S23 and S24, but S23 was
+already taken -- I created it earlier the same day for the outlier-flag audit. The operator's numbering was
+almost certainly written without sight of it.
+
+Resolved by moving the outlier finding to **S25** and giving the operator's numbers the slots as written. That
+direction was chosen because the outlier finding is hours old, exists only in this uncommitted session, and is
+referenced in exactly four places -- all updated (MC section 2, section 8 FIX register, two section 9 rows, and
+BP B.0.5a). The operator's S23/S24 by contrast are the numbers that will appear in whatever prompted the
+amendment. Renumbering the older finding would have been the riskier edit.
+
+**2. B.2 and B.3 could not be applied -- source text not supplied.** The amendment reads "Replace B.2 and B.3
+with sections 3 and 4 above"; those sections were not included in what reached this session.
+
+Not left alone, because leaving them would have been worse than either alternative: B.2 still said "evaluate
+Tardis, Coinglass, Amberdata, Kaiko... this is an operator procurement decision" while section 2 of
+MASTER_CONTEXT now says no paid data is required and section 9 lists six free sources. The plan would have
+contradicted itself on the single most consequential fact in it, and MC sections 3 and 9 now cross-reference
+B.2.2, B.2.4 and B.2.6, which would have pointed at vendor text.
+
+So the obsolete content was **deleted** and replaced with a block that (a) carries a prominent AWAITING
+OPERATOR TEXT marker, (b) holds only the three sub-task anchors the rest of the documents already reference,
+with the content implied by those cross-references, and (c) says explicitly it is not a specification and must
+not be treated as one. **This is removal of falsified content plus placeholders -- not a reconstruction of the
+operator's plan.** B.3's feature list was retained, since nothing falsified it and only its availability
+premise changed.
+
+### Next Steps
+
+1. **Supply sections 3 and 4** so B.2 and B.3 can be properly written. Until then those two sections are stubs.
+2. Confirm the S23 -> S25 renumbering, or say if the outlier finding should keep S23 and the new pair move up.
+3. Unchanged from the previous session: Gate A operator sign-off, then B.0 with B.0.6 (FRED lag) blocking and
+   B.0.1 (dataset freeze) closing the row-count drift before any B.5 count is computed.
+
+
+## Session Update: Stage B.0 -- Hardening, All Six Items (2026-08-18)
+
+Stage B, task B.0, working toward **Gate B**. Suite **374 -> 410 passed** (+36). Nothing committed.
+
+**Numbering note:** the operator's task list renumbers B.0. B.0.4 is now the FRED lag (was B.0.6), B.0.5 the
+dollar index (was B.0.4), B.0.6 the GBP base currency (new). The old outlier audit is retained as B.0.7. The
+operator's numbering is used throughout from here.
+
+### B.0.1 -- dataset frozen, drift closed
+
+`data_engine/freeze.py` + `scripts/freeze_dataset.py`. Snapshots `data/raw/` to an immutable `data/frozen/vN/`
+with a SHA-256 per file and a manifest hash over the whole set. `load_frozen()` verifies on every read.
+
+**Two versions exist, deliberately.** v1 was taken first; v2 after DEXUSUK was ingested for B.0.6.
+
+    frozen dataset v2   dataset_sha256 a5f81b5b8585d982fca8cdb34b3d1ff19542b262770b3cc608bd8b423da8fe16
+
+| file | rows | sha256[:16] |
+|---|---|---|
+| BTCUSDT_basis_1h.parquet | 58,198 | 0c8a8dbd1f7d3f57 |
+| BTCUSDT_funding_8h.parquet | 7,592 | 527b1a7cc6e86c96 |
+| BTC_USDT_1d.parquet | 3,284 | 37adb9ba57b15487 |
+| BTC_USDT_1h.parquet | 78,666 | 84b4ce9698788895 |
+| BTC_USDT_1w.parquet | 469 | 8ef1645848dde68a |
+| ETH_USDT_1h.parquet | 35,361 | 1eeb7ea83aaf83d5 |
+| macro_fred_daily.parquet | 16,336 | 6d062a960382e39f |
+
+Versions are immutable -- `freeze()` refuses to overwrite. A re-pull takes the next number, so a hash recorded
+here keeps meaning what it meant. Hashing is over PARQUET BYTES, not the DataFrame: parquet writes are not
+bit-reproducible across library versions, so a byte hash answers "is this the file I froze", which is the
+question actually being asked.
+
+**`data/` is gitignored**, so the frozen parquets are local. The hash above is the tracked, verifiable artifact
+-- worth stating, because a hash in a document whose data is not in the repo only works if everyone knows that
+is the arrangement.
+
+The drift itself was confirmed live during this session: re-fetching FRED moved dxy_proxy 5,164 -> 5,169,
+us10y 16,138 -> 16,140, vix 9,251 -> 9,252 in three days. Exactly the mechanism B.0.1 exists to stop.
+
+### B.0.2 -- I9 given an implementation, not a convention
+
+`data_engine/point_in_time.py`. An `ObservationPolicy` declares when a value became knowable, separately from
+what it describes; `align_point_in_time(values, bars, policy)` is the only way to join a series onto bars, and
+**policy has no default**. B.1 got funding and macro right by hand -- doing it by hand is the failure mode,
+because the next series is aligned by whoever adds it, under deadline, and the mistake is silent and permanent.
+
+An `ObservationPolicy` also refuses to DEFAULT its lag. Zero is a legitimate choice and must be written down;
+zero-by-omission is exactly the assumption I9 exists to prevent. Negative lag is rejected as lookahead by
+construction.
+
+**A defect found in my own first version.** `assert_no_lookahead` originally aligned the series and then
+checked the result with the same policy -- self-consistent by construction, so it could never fail, and would
+have passed a back-filled series just as happily. It now takes the ALREADY-ALIGNED frame as an argument and
+audits it against the source and policy, so it verifies someone else's alignment rather than its own. Both the
+naive value-timestamp ffill and an outright back-fill are now caught, and both are tested as failures rather
+than the clean case being tested as a pass.
+
+### B.0.3 -- I10 acquisition assertion
+
+`data_engine/acquisition.py`. `AcquisitionRequest` records what was asked for BEFORE the call;
+`assert_acquisition` hard-fails on row count, date range, emptiness, sort order and duplicates. Wired into
+`fetch_funding_rates` -- the endpoint that produced S21 -- on by default.
+
+`allowed_start_slack` is stated per call rather than assumed globally: BTC perps begin 2019-09 whatever you
+ask for, which is a fact about the instrument, but S21's failure returned 2026-03 and still trips the check at
+900 days of slack. The point is that inception is declared, not absorbed.
+
+### B.0.4 -- FRED publication lag, BLOCKING, now modelled
+
+`align_to_bars` routes through `FRED_DAILY`: minimum one BUSINESS day. Business, not calendar -- a calendar
+shift puts Friday's release on Saturday, a day no statistical agency publishes on, understating the delay
+exactly when the weekend gap makes it matter most.
+
+**This is a real behaviour change with a cost, recorded as S28.** A FRED value for date D is no longer visible
+on D's own bars. `test_macro_is_forward_filled_onto_bars` asserted the opposite and has been rewritten -- it
+encoded the defect as the contract.
+
+`fetch_alfred_vintage` raises rather than silently falling back to the floor. A silent fallback would make a
+vintage-accurate run indistinguishable from an approximate one in the output. It needs `FRED_API_KEY`, which
+this environment does not have, so the floor is what actually runs and that is stated rather than implied.
+
+### B.0.5 -- UUP deleted at the ROUTE, not just the config
+
+Removing `dxy_proxy: "UUP"` from `config.yaml` would leave the path open: the next person wanting a dollar
+column adds a ticker and gets a fourth answer. `macro_fetcher._reject_dollar_tickers` now hard-fails on
+dollar-index symbols AND on dollar-ish key names, so reintroduction is an error rather than a silent
+disagreement surfacing months later as an inexplicable Layer 3 result.
+
+`fred_fetcher.dollar_substitution_note()` returns the required sentence as a string so report writers cannot
+paraphrase it into something weaker -- "DXY proxy" is precisely the wording that would let a reader assume
+interchangeability. Tests assert the phrases "DIFFERENT INDEX" and "not a proxy" survive.
+
+**Flagged, not fixed:** `config.yaml` still routes `vix` and `us10y` to yfinance while FRED supplies VIXCLS and
+DGS10 -- the same one-concept-two-sources defect as the dollar. B.0.5 ruled on the dollar only, and retiring two
+more series silently would be scope the ruling did not grant.
+
+### B.0.6 -- GBP base currency
+
+FRED DEXUSUK ingested: 13,947 rows, 1971-01-04 -> 2026-08-14. `backtesting/currency.py` converts equity, P&L
+and drawdown at the point-in-time rate and reports GBP and USD side by side.
+
+**DEXUSUK is USD per ONE GBP, so the conversion DIVIDES (S27).** Reversing it is wrong by ~1.6-squared and
+still looks entirely plausible on a chart, so the direction is asserted in a test rather than trusted.
+
+Weekend handling falls out of I9 rather than being special-cased: Friday's rate is simply the most recent
+observable one until Monday's publishes. That is the last rate anyone could have observed, and the resulting
+weekend exposure is real and unhedgeable rather than a modelling artifact.
+
+**The substantive finding is S26, and it cuts both ways:**
+
+- Percentage risk caps are **currency-invariant**. 2% of GBP equity buys the same position as 2% of the
+  equivalent USD equity -- the rate cancels. So 2/6/10% are unchanged. What changes is the BASE, pinned by
+  `RiskCapBasis` so E.1 cannot quietly implement the caps against the USD book. (Enforcement still does not
+  exist -- S10 stands; `risk_engine` scores, it does not enforce.)
+- Gate metrics are **not** invariant. Measured in test: a perfectly flat USD account under a pound
+  strengthening 1.20 -> 1.45 shows USD maxDD 0.0 and **GBP maxDD > 15%**, with total return below -15%. No
+  trade went differently. The GBP figure is the one the Tier 1 gates read, because it is the drawdown the
+  account actually experiences.
+
+### Tests
+
+36 new (`tests/test_stage_b0_hardening.py`), suite 374 -> 410, all green. Every guard is tested by making it
+FAIL on the defect it exists for -- the S21 truncation shape, a modified frozen file, a naive macro join, a
+back-fill, a reversed FX conversion, a missing rate silently carried at 1.0. New files are lint-clean.
+
+### Gate B status: NOT REACHED
+
+| requirement | status |
+|---|---|
+| B.0 hardening | **DONE -- all six items** |
+| B.4 sweep detector re-specification (`DEFAULT_LEVEL_TOLERANCE_ATR`, S8) | not started |
+| B.5 fully-conditioned event count, four conditions, effective count | not started |
+| Gate B kill: < 200 effective events over the flow window | not evaluated |
+
+### Next Steps
+
+1. **B.4 sweep detector retune** -- select on confirmation rate in low single digits, set in advance, never on
+   downstream performance. Unblocked and now the critical path.
+2. **B.5** -- the free kill test. Reads `data/frozen/v2`, not `data/raw/`.
+3. Still open: Gate A operator sign-off; the S23 -> S25 renumbering confirmation; B.2/B.3 stubs awaiting the
+   operator's sections 3 and 4.
+4. Carried forward: `realised_return` pricing (Stage D), vertical-barrier off-by-one, `config.yaml`'s unread
+   `backtesting:` section and its duplicate vix/us10y routing, `WalkForwardTrainer` on the superseded splitter,
+   ALFRED vintages pending an API key, timeframe-aware outlier threshold (B.0.7b, non-blocking).
+
+
+## Session Update: Mutation Testing the Invariant Guards (2026-08-18)
+
+Suite **410 -> 414 passed** (+4). Nothing committed.
+
+Seven mutants, each removing one guarded behaviour, run against the tests that should catch them. A survivor
+means the suite passes whether or not the behaviour exists -- the test is decoration.
+
+### RESULT: 2 of 7 guards were NOT verified
+
+| mutant | invariant | mutation | first run | after fix |
+|---|---|---|---|---|
+| M1 | I3 | remove `sharpe = float("nan")` on destroyed equity | **SURVIVED full suite** | killed |
+| M2 | S11 | remove the bankruptcy floor entirely | **SURVIVED full suite** | killed |
+| M3 | I3 | ablation solvency gate ignores `equity_destroyed` | killed | killed |
+| M4 | I6 | `n_eff` returns NOMINAL n | killed (8 failures) | killed |
+| M5 | I6 | `n_eff` not computed at all | killed | killed |
+| M6 | min_oos | under-powered folds INCLUDED in aggregate Sharpe | killed | killed |
+| M7 | min_oos | `under_powered_folds` never disclosed | killed | killed |
+
+M1 and M2 survived **all 410 tests**, twice, on the full suite rather than a subset.
+
+### Why they survived -- coverage, not weak assertions
+
+Exactly one test in the repository mentioned `equity_destroyed`
+(`test_equity_destroyed_flag_overrides_a_healthy_looking_maxdd`), and it constructs a `VariantOutcome` by hand.
+That tests the ablation dataclass, which is why M3 died. **Nothing ever drove the harness itself to ruin**, so
+`_run_segment`'s floor and its NaN-forcing were never executed under test.
+
+A guard that is never reached is indistinguishable from one that is absent. Both were written at A.4, both were
+recorded as MET at Gate A, and neither was ever exercised. Gate A's criterion was "harness fixes verified",
+and they were -- by a one-off script, not by anything that would notice a regression.
+
+### The fix
+
+`_ruinous_segment()`: a full-size short held through a 120x rally, run through `_run_segment` so ruin is
+reached by the harness's own order simulation rather than by constructing a `SegmentResult`. Four tests:
+
+1. **precondition** -- the fixture actually reaches ruin. Without it, the two guard tests below would silently
+   stop testing anything, which is the same failure that let M1 and M2 through.
+2. **M1** -- Sharpe is NaN on a destroyed curve, while maxDD stays finite (the refusal must not take the whole
+   result down with it).
+3. **M2** -- equity floored at 0, **and the floor is load-bearing**: the test reconstructs the UNFLOORED curve
+   and asserts it goes deeply negative. Measured: **-1,101,512 on a 10,000 account, 252 bars below zero.**
+   Asserting `min >= 0` alone would have passed vacuously had vectorbt floored internally.
+4. maxDD <= 1.0 on a floored curve.
+
+### SPEC ERROR FOUND AND CORRECTED
+
+MASTER_CONTEXT section 7 defined maxDD as "Values **>= 1.0** are impossible by construction post-fix; if seen,
+it is a bug." That is wrong. Total ruin produces **exactly 1.0** -- equity reaches zero, drawdown is the whole
+account -- and the fixture hits it. Under the old wording, correct behaviour would have been reported as a bug.
+Corrected to **> 1.0**.
+
+Found only because the fixture reached genuine ruin for the first time. The definition had been carried since
+v1 without anything ever testing its boundary.
+
+### Method notes
+
+- Every mutation is restored in a `finally` and the restore verified by SHA-256; `git status` confirms all four
+  mutated files clean afterwards.
+- Mutants are run against targeted tests first and escalated to the FULL suite only on survival -- a mutant
+  killed by a subset is killed by the whole, so escalation is only needed to justify the word "survived".
+- One methodological trap hit and fixed: passing multi-line mutation strings through a shell heredoc mangled
+  them, producing a spurious "site not found" for M5 that could have been misread as a survivor. Mutation
+  strings are now passed via argv or a written file. **A mutation framework that silently fails to mutate
+  reports every guard as fine** -- the same class of error it exists to detect.
+
+### Next Steps
+
+1. Unchanged: B.4 sweep retune, then B.5 (the free kill test, reading `data/frozen/v2`).
+2. Worth considering: extend mutation testing to I1 (AUC never gated), I7 (single book -- already covered by
+   `test_two_book_reconciliation.py`, which was built this way deliberately) and I9/I10, whose B.0 tests were
+   written failure-first and should die readily. I3 and I6 were chosen here because they were the OLDEST
+   guards, and age is what let M1 and M2 rot unobserved.
+
+
+## Session Update: Stage B.4 -- Sweep Detector Retune (2026-08-18)
+
+Stage B, task B.4, working toward **Gate B**. Suite **414 -> 416 passed**. Nothing committed.
+Measured on frozen dataset **v2** (`a5f81b5b8585d982...`), 78,378 modeling rows, 2017-08-29 -> 2026-08-13.
+
+### SELECTED: level_tolerance_atr 0.25 -> 0.05, min_penetration_atr stays 0.25
+
+| mode | tol | pen | rate (all bars) | events | rate (compressed) | events | bull/bear |
+|---|---|---|---|---|---|---|---|
+| coupled | 0.05 | 0.05 | 6.83% | 5,351 | 9.84% | 1,987 | 963/1024 |
+| coupled | 0.10 | 0.10 | 12.28% | 9,622 | 16.13% | 3,258 | 1651/1607 |
+| coupled | 0.15 | 0.15 | 13.53% | 10,595 | 17.27% | 3,488 | 1838/1650 |
+| coupled | 0.25 | 0.25 | 10.93% | 8,562 | 13.04% | 2,634 | 1418/1216 |
+| **fixed** | **0.05** | **0.25** | **2.94%** | **2,299** | **4.03%** | **815** | 414/401 |
+| fixed | 0.10 | 0.25 | 6.48% | 5,077 | 8.65% | 1,747 | 910/837 |
+| fixed | 0.15 | 0.25 | 8.61% | 6,743 | 10.73% | 2,167 | 1150/1017 |
+| fixed | 0.25 | 0.25 | 10.93% | 8,562 | 13.04% | 2,634 | 1418/1216 |
+
+Compression precondition `atr_percentile <= 0.20` selects **20,201 of 78,378 bars (25.77%)**. Not 20% -- it is
+a TRAILING 252-bar percentile rank, so the global share is not the threshold. Recorded because a reader
+expecting 20% would otherwise think something was wrong.
+
+**Selection rule, fixed before any number was read:** confirmation rate in **[1%, 5%]** under the compression
+precondition. `scripts/measure_b4_sweep_retune.py` computes **no downstream metric at all** -- no AUC, no EV, no
+Sharpe -- so the event definition could not have been tuned to the outcome even accidentally. The temptation is
+structurally absent rather than merely resisted.
+
+**Exactly one of eight configurations landed in the band.**
+
+### FINDING: S8's 44.1% is STALE, and the brief's premise with it
+
+The task described current state as 44.1%. Measured today, the UNRETUNED detector (tol=0.25) fires on
+**10.93%** of all bars, not 44.1%.
+
+S8 was recorded before the penetration requirement and `min_sweep_touches >= 4` landed on 2026-08-14. Both
+numbers are real; they describe different code. B.4 therefore started from a far better position than the brief
+assumed, and the retune moved 10.93% -> 2.94%, not 44.1% -> 2.94%.
+
+The 2.04% figure for the earlier compression+SFP proxy remains the right scale reference, and 2.94% now sits
+just above it.
+
+### FINDING: the coupled sweep is NON-MONOTONIC and never reaches the band
+
+`DEFAULT_MIN_PENETRATION_ATR` was documented as deliberately EQUAL to `DEFAULT_LEVEL_TOLERANCE_ATR`. Sweeping
+them together, compressed-bar rate:
+
+    0.25 -> 13.04%    0.15 -> 17.27%    0.10 -> 16.13%    0.05 -> 9.84%
+
+**Tightening the tolerance from 0.25 to 0.15 RAISES the rate.** The two effects fight: a tighter tolerance
+forms fewer and smaller clusters (fewer sweeps) but simultaneously weakens the penetration requirement (more
+sweeps). No coupled setting reaches 1-5%.
+
+Re-reading the original rationale -- "a cluster's level is only defined to within +/- that tolerance, so a
+penetration smaller than it is inside the level's own uncertainty band" -- it gives a **lower bound**,
+`penetration >= tolerance`, not an equality. Setting them equal was the minimal choice satisfying it. Holding
+penetration at 0.25 while tightening tolerance to 0.05 satisfies the bound with room to spare and is strictly
+MORE conservative than the old equal setting.
+
+Decoupling is what made the band reachable. The bound is now ENFORCED (`min_penetration_atr < level_tolerance_atr`
+raises), with tests for both the rejection and the still-legal equality.
+
+### HONEST CAVEAT: this is a narrow escape, not a plateau
+
+One of eight configurations qualified. The neighbouring setting (0.10/0.25) is 8.65% -- nearly double the band
+ceiling. The selected point is not surrounded by other acceptable points, so the confirmation rate is
+sensitive to the tolerance in this region and a small future change to clustering could move it out of band.
+
+Both arms were pre-registered in the script docstring before the run, and the band was fixed in advance, so the
+rule selected the configuration rather than the configuration being selected and a rule found for it. But
+running two arms and having exactly one qualify is worth stating plainly rather than presenting 4.03% as a
+robust result.
+
+### Event counts by window -- what Gate B actually faces
+
+Two-condition events (compression AND confirmed sweep) at the selected setting:
+
+| window | events |
+|---|---|
+| full OHLCV (2017-08 ->) | 815 |
+| funding window (2019-09 ->) | 567 |
+| **flow window (2019-12-23 ->)** | **516** |
+
+**516 is the ceiling for Gate B, not the answer.** Two of four conditions are applied. Still to come at B.5:
+`macro_regime in {risk-on, transitional}`, `mtf_alignment >= 3/4`, then structural collapse within a compression
+episode, then the effective count `Sum u_bar_i`. Each strictly reduces. Gate B needs **>= 200 effective**.
+
+Recorded now, before B.5 runs, so the outcome is not read as a surprise: two more conditions and an effective-n
+haircut have to take 516 down by less than 61% for the gate to pass. That is not obviously safe. **This is
+stated as a forecast, not a target** -- the conditions are a priori and B.5 will not be loosened to reach 200.
+
+### Method check: no lookahead in the scan
+
+The scan hands `estimate_liquidity_trap` exactly `lookback + 1` rows so its own strictly-prior windowing holds.
+Verified directly rather than assumed: tripling `high`/`low`/`close` on every bar AFTER the scanned range left
+all 400 verdicts identical, while the current bar does move them.
+
+### Not done, deliberately
+
+- `min_sweep_touches = 4` was NOT swept. It is a selectivity lever and not one of the three named suspects;
+  sweeping it alongside the tolerance would have made the selection a two-dimensional search over a band, which
+  is how a definitional target quietly becomes an optimisation.
+- The compression precondition is applied at the EVENT-SET level, not wired inside the detector. Identical event
+  sets either way, and it keeps the detector a pure sweep detector with the condition visible in D.1's rule
+  rather than duplicated in two places.
+- `0.20` was never varied. A priori from hypothesis text, S6 retired, prohibited from re-tuning.
+
+### Gate B status: NOT REACHED
+
+| requirement | status |
+|---|---|
+| B.0 hardening | DONE |
+| B.4 sweep detector re-specification | **DONE -- 4.03% compressed, in band** |
+| B.5 fully-conditioned event count, four conditions, effective count | **next** |
+| Gate B kill: < 200 effective events over the flow window | not evaluated |
+
+### Next Steps
+
+1. **B.5 -- the free kill test.** Apply macro_regime and MTF alignment to the 516, collapse within compression
+   episodes, compute `Sum u_bar_i`, report against all three windows plus the three-condition diagnostic.
+2. Still open: Gate A operator sign-off; S23 -> S25 renumbering confirmation; B.2/B.3 stubs awaiting sections 3
+   and 4.
+
+
+## Session Update: B.4 Stability -- Flow Window Split by Time (2026-08-18)
+
+Stability check on the config already selected at B.4. **Not hyperparameter search** -- no new configuration is
+introduced and nothing is selected here. The question is whether 4.03% is a property of the detector or an
+artifact of pooling two dissimilar regimes. Suite unchanged at **416** (script only, no source touched).
+
+Flow window 2019-12-23 -> 2026-08-13 (58,171 bars), split at the time midpoint **2023-04-18**.
+
+### RESULT: the selected config lands in-band on BOTH halves
+
+| config | half | window | comp bars | events | rate | 95% CI (Wilson) | band |
+|---|---|---|---|---|---|---|---|
+| **0.05/0.25** | H1 | 2019-12-23 -> 2023-04-18 | 7,526 | 323 | **4.29%** | [3.86%, 4.77%] | **IN** |
+| **0.05/0.25** | H2 | 2023-04-18 -> 2026-08-13 | 6,579 | 193 | **2.93%** | [2.55%, 3.37%] | **IN** |
+| **0.05/0.25** | pooled | full flow window | 14,105 | 516 | 3.66% | [3.36%, 3.98%] | IN |
+| 0.05/0.05 | H1 | 2019-12-23 -> 2023-04-18 | 7,526 | 769 | 10.22% | [9.55%, 10.92%] | OUT |
+| 0.05/0.05 | H2 | 2023-04-18 -> 2026-08-13 | 6,579 | 551 | 8.38% | [7.73%, 9.07%] | OUT |
+| 0.05/0.05 | pooled | full flow window | 14,105 | 1,320 | 9.36% | [8.89%, 9.85%] | OUT |
+
+Both halves are in-band with **entire confidence intervals inside [1%, 5%]**, not merely point estimates. The
+pooled figure is not an averaging artifact, and the narrow-escape concern is addressed on the stability
+dimension.
+
+### THE CONFIG NAMED IN THE REQUEST WAS NOT THE SELECTED ONE
+
+The request asked to verify **0.05/0.05**. The config selected at B.4 is **0.05/0.25** -- tolerance 0.05 with
+penetration held at 0.25. `0.05/0.05` is the COUPLED row, which scored 9.84% pooled at B.4 and is **OUT of band
+on both halves** (10.22%, 8.38%).
+
+Almost certainly shorthand for "the 0.05 config", but the two are easy to conflate by tolerance alone and they
+give answers on opposite sides of the band. Both are reported above so the distinction is visible rather than
+assumed. Had the check been run only on 0.05/0.05, it would have appeared to falsify a selection that in fact
+holds.
+
+### FINDING: the rate DECLINES significantly between halves, and both remain in band
+
+4.29% -> 2.93% is a drop of roughly one third, and the confidence intervals **do not overlap**
+([3.86, 4.77] vs [2.55, 3.37]). This is a real non-stationarity, not sampling noise.
+
+It does not affect the selection -- both halves clear the band comfortably -- but it is worth recording for two
+reasons:
+
+1. **B.5 and Stage C draw from the later period.** Compressed bars themselves also fell (7,526 -> 6,579), so
+   the recent regime supplies fewer events on both counts. Event availability is not uniform across the flow
+   window, and any fold structure that weights recent data more heavily will see fewer events than the pooled
+   figure implies.
+2. Reported now, before B.5, so a thinner-than-expected event count in recent folds is read as this known
+   drift rather than as a new defect.
+
+Note the denominator difference, which explains 4.03% vs 3.66%: B.4's 4.03% was over compressed bars in the
+FULL OHLCV window (815 / 20,201); this table is flow-window only (516 / 14,105). Both are correct and neither
+supersedes the other -- the flow-window figure is the one Gate B operates on.
+
+### Method
+
+Wilson score intervals rather than the normal approximation: halving the sample is the entire point of the
+check, and the normal approximation degrades exactly where that would matter. The band, the compression
+threshold and the config were all fixed before this ran, and no downstream metric is computed by
+`scripts/measure_b4_stability.py`.
+
+### Next Steps
+
+Unchanged -- **B.5, the free kill test**, is next. The 516 flow-window two-condition events now carry a
+stability result, and the H1/H2 drift is on record before the count is taken.
+
+
+## Session Update: Stage B.5 -- Event Count. GATE B NOT EVALUABLE (2026-08-18)
+
+Stage B, task B.5, **Gate B**. Suite unchanged at **416** (script only). Frozen dataset **v2**.
+
+### THE BRIEF'S PREMISE IS FALSE: two of four conditions are blocked
+
+B.5 was specified as "all four conditions use data in hand -- no external dependency." Checked directly:
+
+| # | condition | status |
+|---|---|---|
+| 1 | `atr_percentile <= 0.20` | COMPUTABLE |
+| 2 | `confirmed_sweep` | COMPUTABLE (tuning frozen at B.4) |
+| 3 | `macro_regime in {risk-on, transitional}` | **BLOCKED -- DATA** |
+| 4 | `mtf_alignment >= 3/4` | **BLOCKED -- SPECIFICATION** |
+
+**Condition 3.** `MacroSignalSnapshot` requires `btc_dominance_20d_trend_pct` and `btc_qqq_corr_20d`. Neither
+has an ingested source; `macro_fred_daily.parquet` holds only `dxy_proxy`, `us10y`, `vix`, `gbpusd`. Both
+missing fields are legs of MASTER_CONTEXT's own Risk-On definition ("BTC dominance expanding, BTC/QQQ
+correlation positive"), so they are not optional extras.
+
+**Condition 4.** `score_mtf_alignment` scores agreement across four ALREADY-DERIVED signed directional readings
+and states explicitly that deriving them is out of scope. Nothing in the repository derives them. The DATA
+exists (1h ingested, 4h resampleable, 1d and 1w ingested, plus `struct_trend_state` / `struct_bos_*` features);
+what is missing is the mapping from features to a signed [-1, 1] reading per timeframe.
+
+**Neither `classify_macro_regime` nor `score_mtf_alignment` has a single caller outside its own test file.**
+Both are built, unit-tested in isolation, and wired to nothing.
+
+This is **S13 recurring**: "Layers 3 and 4 require data that is not ingested; only 1 of 4 conditions has ever
+been applied." S13 was recorded two phases ago. The count is now 2 of 4.
+
+### WHAT WAS COMPUTED, AND WHY IT IS STILL WORTH HAVING
+
+The two-condition event set, with the full independence treatment. Adding conditions can only REMOVE events, so
+**the two-condition effective count is a strict upper bound on the four-condition gate number.**
+
+| window | comp bars | raw | after structural | **EFFECTIVE** | eff/raw |
+|---|---|---|---|---|---|
+| **flow (2019-12-23 ->) [GATE]** | 14,105 | 516 | 326 | **298.9** | 0.917 |
+| funding-only (2019-09-10 ->) | 14,921 | 567 | 351 | 323.2 | 0.921 |
+| full OHLCV (reference) | 20,201 | 815 | 501 | 455.0 | 0.908 |
+
+Cumulative filter, full OHLCV window: 78,328 bars scanned -> 20,200 compressed -> **815** also confirmed-sweep.
+Individually: compression 20,200 (25.79%), confirmed sweep 2,299 (2.94%).
+
+Independence used exactly the pre-specified rules and invented no constant: structural collapse to one event
+per (compression episode, direction), then `Sum u_bar_i` via the A.2 code.
+
+**The effective/raw ratio is 0.917, inside the 0.7-0.95 band recorded IN ADVANCE at MASTER_CONTEXT section 7.**
+The prediction was written down before the measurement and it held -- events really are sparse enough that
+overlap costs little, unlike the 0.145-0.218 seen on all bars (S16).
+
+### GATE B: INDETERMINATE. NOT PASSED, NOT FAILED.
+
+The upper bound (298.9) clears 200, so **the decisive-negative branch does not fire** -- I cannot report the
+kill. But the gate number does not exist, so I equally cannot report a pass.
+
+**The remaining budget is tight.** Conditions 3 and 4 together may remove no more than **33%** of the effective
+count for the gate to hold. For scale, the structural + effective haircut alone already took 516 -> 298.9, a 42%
+reduction. `mtf_alignment >= 3/4` is a demanding condition on its own -- three of four timeframes agreeing is
+not a common state -- and `macro_regime` excludes every Risk-Off period. It is entirely plausible that the two
+together exceed 33%.
+
+Recorded now, before those conditions exist, so that a subsequent failure is not read as a surprise and a
+subsequent pass is not read as vindication of a number nobody had.
+
+### ETH -- information only, outside the gate
+
+289 raw -> 185 structural -> **174.0 effective**, over 2022-08-12 -> 2026-08-13. ETH 1h begins 2.6 years INSIDE
+the flow window and has no funding or basis ingested, so these events sit where Stages C and D cannot operate.
+Below 200 on its own, and it does not enter the gate.
+
+### WHAT UNBLOCKING COSTS
+
+**Condition 4 is cheap but is a DECISION, not a task.** The data is present; the missing piece is the
+feature-to-direction mapping. Inventing it here would define the event condition at the moment of the kill
+test, and that choice determines the gate number -- precisely the inversion Gate B prohibits. It must be
+pre-registered before any count is taken.
+
+**Condition 3 is genuinely blocked on data, and asymmetrically:**
+- `btc_qqq_corr_20d` -- QQQ daily history is free via yfinance. Cheap.
+- `btc_dominance_20d_trend_pct` -- **no free historical source.** CoinGecko's `/global` endpoint returns
+  CURRENT dominance only. Historical dominance requires historical total market cap, which is paid. This
+  contradicts S23's "no paid data is required" for the OI/liquidation track -- S23 was about derivatives flow
+  and does not extend to macro.
+
+Options for the dominance leg, none of which I should pick unilaterally: procure it, drop that leg from the
+Risk-On definition and record the weakening, or restate condition 3. All three change what H1 says.
+
+### Next Steps -- OPERATOR DECISIONS, blocking
+
+1. **Rule on condition 4's direction mapping**, pre-registered before B.5 is re-run.
+2. **Rule on the dominance leg of condition 3** -- procure, drop-and-record, or restate.
+3. Only then can Gate B be evaluated. **Do not loosen conditions to reach 200**; the 298.9 bound is
+   deliberately reported as a bound and must not be substituted for the gate number.
+4. Still open from earlier: Gate A operator sign-off; S23 -> S25 renumbering confirmation; B.2/B.3 stubs.
+
+
+
+## PRE-REGISTRATION RECORD -- Conditions 3 and 4 (2026-08-18)
+
+Committed BEFORE any four-condition count was computed. Branch `b5-prereg-conditions`.
+
+    commit a5a8fbd8723ec9ccdf09150ed8b709f272f588a3
+      prereg/condition_4_mtf.md
+      prereg/condition_3_macro.md
+
+Falsification budget **2 of 3 -> 1 of 3** (revision 2: condition 3 restated, dominance leg removed).
+
+Known at registration time and recorded so the ordering is auditable: two-condition upper bound 298.9
+effective on the flow window; Gate B threshold 200; remaining budget 33%. The definitions were written with
+those numbers visible, which is precisely why registration precedes the count.
+
+
+## Session Update: Stage B.5 -- GATE B EVALUATED. H1 FAILS ON SAMPLE GROUNDS (2026-08-18)
+
+Stage B, task B.5, **Gate B**. Suite **416 -> 431 passed** (+15). Frozen dataset **v3**
+(`913f80f490520e7f0d469872e4b33016fcad7a06881aa1d9dbd7b66af421f733`), verified before measuring.
+Live invariants: I4, I5, I6, I9, I10, and the new I11.
+
+### GATE B: FAILS. 100.0 effective, threshold 200.
+
+    flow window (2019-12-23 ->)   raw 156   structural 100   EFFECTIVE 100.0   <- THE GATE
+    funding-only (2019-09-10 ->)  raw 172   structural 109   effective 109.0
+    full OHLCV (reference)        raw 247   structural 155   effective 151.3
+
+**Half the requirement. Not a marginal miss.** H1 falsification condition 2 is met: "fully-conditioned event
+count < 200 independent instances". No condition, threshold or independence rule was loosened, and none moved
+after the count was seen.
+
+### Cumulative filter -- which condition does the work
+
+| step | events | change |
+|---|---|---|
+| bars scanned | 78,328 | |
+| + 1. `atr_percentile <= 0.20` | 20,200 | -74.2% |
+| + 2. `confirmed_sweep` | 815 | -96.0% |
+| + 3. `macro_regime in {risk-on, transitional}` | 800 | **-1.8%** |
+| + 4. `mtf_alignment >= 3/4` | 247 | **-69.1%** |
+
+Individually: compression 20,200 (25.79%), sweep 2,299 (2.94%), macro 75,817 (96.79%), MTF 741 of 2,147 scored
+(34.51%). MTF alignment distribution over scored sweep bars: **0:321, 1:551, 2:534, 3:506, 4:235**.
+
+**MTF is the binding filter (S30).** Three-of-four agreement is genuinely uncommon -- as forecast before the
+count, in both the operator's brief and `prereg/condition_4_mtf.md`.
+
+### The pre-registrations held, and both of their forecasts were correct
+
+Committed at **`a5a8fbd8723ec9ccdf09150ed8b709f272f588a3`** on branch `b5-prereg-conditions`, BEFORE any
+four-condition number existed.
+
+1. **`prereg/condition_3_macro.md` predicted macro would remove few events**, because Risk-Off is an AND of
+   three conditions including `corr >= 0.7`. Measured: Risk-Off is 2,088 of 78,328 bars (2.7%), and condition 3
+   removed 15 events (-1.8%). **Predicted before counting, confirmed after (S31).**
+2. **The operator's forecast** -- "conditions 3 and 4 together may remove no more than 33% for the gate to
+   pass... failure is more likely than not" -- was correct. They removed 69.7%.
+
+Both are recorded because a forecast that lands only counts if it was written down first.
+
+### DEVIATION FROM A PRE-REGISTERED EXPECTATION, reported as required
+
+MASTER_CONTEXT section 7 recorded an expected effective/raw ratio of **0.7-0.95** for events. Measured:
+**1.000** on the flow window, 0.976 on the full window. **Above the band.**
+
+Cause, verified rather than assumed (I4): median label horizon is 5 bars against a mean event spacing of 582
+bars over the flow window, so the [t0, t1] windows of 100 events simply do not overlap. The structural collapse
+did all the reduction (156 -> 100); temporal concurrency contributed nothing.
+
+**This does not rescue the count -- it explains why the count is small.** The band was recorded so that a value
+outside it would be read as a defect in the sampler; inspected directly, it is not a defect, it is sparsity.
+
+### H1/H2 split -- the B.4 drift did NOT compound
+
+| half | raw | structural | effective | comp bars | events/comp bar | 95% CI (Wilson) |
+|---|---|---|---|---|---|---|
+| H1 (-> 2023-04-18) | 80 | 51 | 51.0 | 7,526 | 0.678% | [0.516%, 0.890%] |
+| H2 (2023-04-18 ->) | 76 | 49 | 49.0 | 6,579 | 0.745% | [0.564%, 0.983%] |
+
+The intervals **overlap substantially** and H2's point estimate is slightly HIGHER. B.4 found a real decline in
+raw sweep rate (4.29% -> 2.93%, non-overlapping CIs), and the concern was that macro and MTF would skew the
+same way and starve late purged-CV folds at Stage C. **They do not.** The two halves are near-identical at 51.0
+and 49.0 effective.
+
+That concern is closed -- but it is moot: both halves are far below any usable size, so there are no late folds
+to starve.
+
+### The falsification-budget revision had NO effect on this outcome
+
+Budget was decremented **2 -> 1** for restating condition 3 (dominance leg removed, no free historical source).
+
+Recorded in the prereg before counting and now **proved by test** over a 1,125-point grid
+(`test_dominance_leg_cannot_change_the_admitted_set`): `dominance_expanding` appears only in `risk_on`, never
+in `risk_off`, and H1 admits `{risk-on, transitional}` = NOT Risk-Off. Removing the leg moves bars from
+Transitional to Risk-On -- both admitted. **The admitted event set is identical either way.**
+
+Condition 3 removed 15 events. Even a perfectly-available dominance series could not have changed the gate
+outcome. **The operator may wish to restore the budget to 2 of 3.** The decrement was applied as ruled and is
+not reversed unilaterally.
+
+### DEVIATION FROM THE BRIEF: US10Y is not a classifying leg
+
+The brief listed US10Y among condition 3's inputs. It is ingested, carried and reported, but **does not gate**.
+
+STEP 2 required each threshold to be justified from the existing MASTER_CONTEXT Risk-On definition.
+**MASTER_CONTEXT's regime table contains no US10Y term in any of its four states**, so no threshold for it can
+meet that standard -- any value would have been invented at the moment of the kill test and then frozen by the
+registration itself. This also matches a documented prior decision in `macro_regime.py`. Flagged for overrule;
+it is recorded in `prereg/condition_3_macro.md`.
+
+### I11 added, with guards
+
+> **I11 -- A module with no caller outside its own test file is not a built condition.** Build plans verify
+> wiring, not existence.
+
+`classify_macro_regime` and `score_mtf_alignment` passed their own tests for two phases while unreachable, and
+B.5 discovered it at the kill test. `src/macro_mtf_liquidity_vol/conditions.py` is now their production caller,
+and `test_condition_module_has_a_production_caller` fails if either loses it. The guard is itself tested for
+non-vacuousness.
+
+### What landed
+
+- `prereg/condition_3_macro.md`, `prereg/condition_4_mtf.md` -- committed `a5a8fbd8` BEFORE any count
+- `src/macro_mtf_liquidity_vol/conditions.py` -- both conditions, built to registration, I9 throughout
+- `classify_macro_regime(use_dominance_leg=...)` -- explicit flag, not a sentinel; confidence averages over 3
+  legs when the leg is off rather than reporting a number partly driven by absent data
+- `scripts/ingest_qqq.py` -- QQQ daily, 6,901 rows 1999-03-10 -> 2026-08-14, I10-verified, I9 policy
+  `MARKET_DAILY_CLOSE`, single-sourced (`macro_fetcher` hard-fails a second route; `config.yaml` entry deleted)
+- `point_in_time`: `MARKET_DAILY_CLOSE`, `BAR_CLOSE_1D`, `BAR_CLOSE_1W`
+- `scripts/measure_b5_gate_b.py`, `tests/test_conditions_3_and_4.py` (15 tests)
+- Frozen **v3** with QQQ; I11 in MASTER_CONTEXT; O3 resolved NO; S29-S32
+- Logged to `trials.jsonl` (stage B.5, prereg commit and frozen hash in params)
+
+### What is deferred, and why
+
+- **Stage B.2/B.3 (flow data), Stage C, Stage D** -- all downstream of Gate B. Not started. Stopping at the
+  gate is the instruction and the point.
+- **ETH** -- out of scope by the 2026-08-15 ruling. Its two-condition count was 174.0 effective; it was never
+  going to rescue a four-condition count, and adding it after seeing 100.0 would invert the gate.
+- **ALFRED vintages, B.0.7b outlier threshold, `realised_return` pricing, vertical-barrier off-by-one** --
+  unchanged, and now moot pending the H1 decision.
+- **Nothing committed beyond the pre-registration.** The working tree carries B.0, B.4, B.5 and the mutation
+  tests, suite green at 431, awaiting operator review.
+
+### GATE B STATUS: FAILED. STOPPING.
+
+Under section 6, this is a **decisive negative** -- a hard count at half the threshold, not an ambiguous or
+marginal result. A revision responding to it is therefore **free** and does not consume the remaining budget
+(1 of 3, or 2 of 3 if the condition-3 decrement is restored per the finding above).
+
+**Not proceeding past the gate.** The decision -- revise H1 or terminate -- is the operator's.

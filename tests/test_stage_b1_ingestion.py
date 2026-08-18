@@ -120,14 +120,28 @@ def test_funding_gap_classification_uses_the_8h_cadence():
 # ---------------------------------------------------------------------- #
 
 
-def test_macro_is_forward_filled_onto_bars():
+def test_macro_is_forward_filled_onto_bars_at_observation_time_not_value_date():
+    """UPDATED AT B.0.4. This previously asserted that a FRED value for date
+    D was visible on D's own bars -- i.e. a zero publication lag. That was
+    the defect, not the contract: FRED stamps an observation with the date
+    it DESCRIBES, and macro now gates event formation, so an unlagged join
+    contaminates the event set itself rather than one feature column.
+
+    `align_to_bars` now shifts by FRED_DAILY's one-business-day floor.
+    Monday 2024-01-01's value becomes observable Tuesday 2024-01-02."""
     macro = pd.DataFrame({"vix": [15.0, 16.0]},
                          index=pd.to_datetime(["2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z"], utc=True))
     bars = pd.date_range("2024-01-01T00:00:00Z", periods=48, freq="1h")
     out = align_to_bars(macro, bars)
-    assert out["vix"].iloc[0] == 15.0
-    assert out["vix"].iloc[23] == 15.0
-    assert out["vix"].iloc[24] == 16.0
+
+    # Monday's bars cannot see Monday's observation.
+    assert out["vix"].iloc[0] != out["vix"].iloc[0]      # NaN
+    assert out["vix"].iloc[23] != out["vix"].iloc[23]    # NaN
+    # Tuesday 00:00 is when Monday's value becomes knowable.
+    assert out["vix"].iloc[24] == 15.0
+    assert out["vix"].iloc[47] == 15.0
+    # Tuesday's own value is not observable until Wednesday, beyond this range.
+    assert 16.0 not in set(out["vix"].dropna())
 
 
 def test_weekend_is_market_closed_not_a_data_error():

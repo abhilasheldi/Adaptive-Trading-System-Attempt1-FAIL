@@ -516,9 +516,42 @@ def test_cluster_minimum_of_two_is_still_reachable_explicitly():
     assert r.sweep_just_confirmed is True
 
 
-def test_selectivity_defaults_are_the_documented_values():
-    assert DEFAULT_MIN_PENETRATION_ATR == DEFAULT_LEVEL_TOLERANCE_ATR == 0.25
+def test_selectivity_defaults_are_the_b4_selected_values():
+    """B.4 (2026-08-18). Tolerance retuned 0.25 -> 0.05 by sweeping
+    {0.05, 0.10, 0.15} against a 1-5% confirmation-rate band fixed in
+    advance, with the compression precondition applied. Exactly one
+    configuration landed in the band: 4.03% on compressed bars, 815 events.
+
+    Penetration stays at 0.25 and is now DECOUPLED from the tolerance -- the
+    original rationale gives a lower bound (penetration >= tolerance), not an
+    equality, and holding it at 0.25 is strictly more conservative."""
+    assert DEFAULT_LEVEL_TOLERANCE_ATR == 0.05
+    assert DEFAULT_MIN_PENETRATION_ATR == 0.25
+    assert DEFAULT_MIN_PENETRATION_ATR >= DEFAULT_LEVEL_TOLERANCE_ATR
     assert DEFAULT_MIN_SWEEP_TOUCHES == 4
+
+
+def test_penetration_below_tolerance_is_rejected():
+    """The bound that replaced the old equality. Below the tolerance, a
+    'penetration' is inside the level's own uncertainty band and cannot be
+    distinguished from touching it."""
+    with pytest.raises(ValueError, match="below level_tolerance_atr"):
+        estimate_liquidity_trap(
+            _sweep_fixture(touches=5, penetration=0.5),
+            level_tolerance_atr=0.25,
+            min_penetration_atr=0.05,
+        )
+
+
+def test_penetration_equal_to_tolerance_is_still_allowed():
+    """The old coupled setting must remain reachable -- B.4 decoupled the
+    default, it did not forbid the equality."""
+    r = estimate_liquidity_trap(
+        _sweep_fixture(touches=5, penetration=0.5),
+        level_tolerance_atr=0.25,
+        min_penetration_atr=0.25,
+    )
+    assert r.sweep_just_confirmed in (True, False)  # must not raise
 
 
 def test_min_sweep_touches_below_the_cluster_minimum_is_rejected():

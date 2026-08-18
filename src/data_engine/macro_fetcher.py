@@ -25,6 +25,64 @@ logger = logging.getLogger(__name__)
 
 _COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
 
+# ---------------------------------------------------------------------- #
+# B.0.5 -- the dollar measure is DTWEXBGS, and only DTWEXBGS
+# ---------------------------------------------------------------------- #
+# Three dollar series were once reachable in this repo: ICE DXY (referenced
+# in the source document), FRED DTWEXBGS (ingested at B.1), and UUP (an ETF
+# tracking DXY futures, requested through this module via config.yaml).
+# Deleting the config entry alone would leave the ROUTE open -- the next
+# person who wants a dollar column adds a ticker and gets a fourth answer.
+#
+# So the route is closed here as well. This is a guard against reintroduction,
+# not a validation of user input: the failure it prevents is silent
+# disagreement between two dollar series, which surfaces as an inexplicable
+# Layer 3 result months later rather than as an error.
+_FORBIDDEN_DOLLAR_TICKERS = {
+    "UUP", "UDN", "DX-Y.NYB", "DXY", "DX=F", "USDX", "^DXY",
+}
+_DOLLAR_KEY_HINTS = ("dxy", "dollar", "usd_index", "usdindex")
+
+
+# B.5 STEP 3 -- QQQ is single-sourced, same ruling as DTWEXBGS. It is
+# ingested by `scripts/ingest_qqq.py` into `data/raw/QQQ_daily.parquet` and
+# feeds condition 3's BTC/QQQ correlation leg. A second route would give a
+# second correlation series, and Layer 3 would then depend on whichever one
+# a caller reached for -- the exact failure the dollar ruling closed.
+_QQQ_CANONICAL_SOURCE = "scripts/ingest_qqq.py -> data/raw/QQQ_daily.parquet"
+
+
+def _reject_duplicate_qqq_route(tickers: Dict[str, str]) -> None:
+    """Hard-fail if QQQ is requested through this module (B.5 STEP 3)."""
+    for name, symbol in tickers.items():
+        if str(symbol).upper().strip() == "QQQ" or "qqq" in str(name).lower():
+            raise ValueError(
+                f"QQQ requested as {name!r}={symbol!r} through macro_fetcher. QQQ is "
+                f"single-sourced at {_QQQ_CANONICAL_SOURCE} and feeds condition 3's "
+                f"BTC/QQQ correlation leg (pre-registered at "
+                f"prereg/condition_3_macro.md). Two routes would give two correlation "
+                f"series and Layer 3 would depend on whichever a caller reached for -- "
+                f"the same defect the DTWEXBGS ruling closed. If this needs to change, "
+                f"change the registration first."
+            )
+
+
+def _reject_dollar_tickers(tickers: Dict[str, str]) -> None:
+    """Hard-fail if a dollar index is requested through yfinance (B.0.5)."""
+    for name, symbol in tickers.items():
+        sym = str(symbol).upper().strip()
+        key = str(name).lower()
+        if sym in _FORBIDDEN_DOLLAR_TICKERS or any(h in key for h in _DOLLAR_KEY_HINTS):
+            raise ValueError(
+                f"Dollar-index ticker {symbol!r} requested as {name!r}. The dollar "
+                f"measure is FRED DTWEXBGS via data_engine.fred_fetcher, decided at "
+                f"B.0.5 and recorded as S19. UUP is an ETF tracking DXY futures -- a "
+                f"third series with its own tracking error and US-hours calendar, and "
+                f"having two reachable dollar columns is how Layer 3 ends up evaluated "
+                f"against whichever one a caller happened to reach for. If this needs "
+                f"to change, change the ruling first."
+            )
+
 
 def fetch_macro_tickers(
     tickers: Dict[str, str],
@@ -49,6 +107,9 @@ def fetch_macro_tickers(
         DataFrame with a UTC daily datetime index and columns named
         "{semantic_name}_{Metric}" (e.g. "vix_Close", "us10y_Close").
     """
+    _reject_dollar_tickers(tickers)      # B.0.5 -- DTWEXBGS is the dollar measure
+    _reject_duplicate_qqq_route(tickers)  # B.5 STEP 3 -- QQQ is single-sourced
+
     symbol_list = list(tickers.values())
     kwargs = {"start": start} if start else {"period": "max"}
 
